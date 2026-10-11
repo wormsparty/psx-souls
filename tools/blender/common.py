@@ -153,8 +153,9 @@ def tex_stripes(a, b, n=8, size=64, seed=5):
 _materials = {}
 
 
-def material(name, color=(0.8, 0.8, 0.8), tex=None, emissive=None):
-    """Simple material: flat colour or texture ("closest" filtering, PS1 style)."""
+def material(name, color=(0.8, 0.8, 0.8), tex=None, emissive=None, size=64):
+    """Simple material: flat colour or texture ("closest" filtering, PS1 style), `size` pixels
+    square (the `tex` function's own size)."""
     if name in _materials:
         return _materials[name]
     m = bpy.data.materials.new(name)
@@ -163,7 +164,7 @@ def material(name, color=(0.8, 0.8, 0.8), tex=None, emissive=None):
     bsdf = nt.nodes.get("Principled BSDF")
     bsdf.inputs["Roughness"].default_value = 1.0
     if tex is not None:
-        img = make_image(name + "_tex", 64, tex)
+        img = make_image(name + "_tex", size, tex)
         node = nt.nodes.new("ShaderNodeTexImage")
         node.image = img
         node.interpolation = "Closest"

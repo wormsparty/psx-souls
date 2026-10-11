@@ -364,17 +364,6 @@ SHOULDER = merge(legs(-10, 35, 25, 35, -0.12, twist=30), {"chest": (-6, 0, 35), 
                  arm("R", (-140, 30, 0), (-40, 0, 0), (40, 0, 0)), arm("L", (-120, 10, 0), (-40, 0, 0), (40, 0, 0)))
 anim("greatsword_charge", [(0, STANCE_G), ("T", SHOULDER)])
 chop("greatsword_heavy_charged", "h0-6", SHOULDER, SHOULDER)
-HIGH_GUARD = merge(legs(-20, 28, 14, 24, -0.07, twist=10), {"chest": (-4, 0, 10), "head": (0, 0, -10)},
-                   arm("R", (-150, 25, 0), (-25, 0, 0), (0, 0, 90)), arm("L", (-150, -15, 0), (-20, 0, 0)))
-LOW_R = merge(legs(-30, 45, 20, 35, -0.15, twist=-15), {"chest": (24, 0, -35)},
-              arm("R", (-20, 30, 0), (-10, 0, 0), (110, 0, 0)), arm("L", (-25, 40, 0), (-10, 0, 0), (110, 0, 0)))
-RISE = merge(legs(-40, 30, 25, 10, -0.05, twist=10, fwd=0.1), {"chest": (-12, 0, 35), "head": (-10, 0, -20)},
-             arm("R", (-165, -10, 0), (-5, 0, 0), (40, 0, 0)), arm("L", (-160, 5, 0), (-5, 0, 0), (40, 0, 0)))
-anim("greatsword_special", [
-    (0, STANCE_G), (6, HIGH_GUARD), (30, merge(HIGH_GUARD, {"chest": (0, 0, 14)})), ("h0-2", LOW_R),
-    ("h0e", RISE), ("h0e+10", RISE), ("T", STANCE_G),
-])
-anim("greatsword_counter", [(0, HIGH_GUARD), ("h0-3", LOW_R), ("h0e", RISE), ("h0e+8", RISE), ("T", STANCE_G)])
 PLUNGE_UP = merge(legs(-20, 30, 20, 30, -0.05), {"chest": (-15, 0, 0)},
                   arm("R", (-175, 6, 0), (-10, 0, 0), (180, 0, 0)), arm("L", (-175, 18, 0), (-10, 0, 0), (180, 0, 0)))
 PLUNGE = merge(legs(-50, 60, 30, 30, -0.25, fwd=0.1), {"chest": (40, 0, 0)},
@@ -394,6 +383,21 @@ anim("rapier_jump", [
 anim("greatsword_jump", [
     (0, merge(OVERHEAD, AIR_LEGS)), ("h0-4", merge(OVERHEAD, AIR_LEGS, {"chest": (-20, 0, 0)})),
     ("h0", merge(CHOP, {"chest": (34, 0, 0)})), ("h0e", CHOP_LOW), ("h0e+16", CHOP_LOW), ("T", STANCE_G),
+])
+
+# Greatsword special: crouch, leap with the blade raised, hang at the top, vertical cleave
+# on the way down, landing crouched with the blade in the ground.
+CROUCH = merge(legs(-70, 95, 45, 85, -0.32, fwd=0.08), {"chest": (30, 0, 0), "head": (-20, 0, 0)},
+               arm("R", (-25, 10, 0), (-30, 0, 0), (85, 0, 0)), arm("L", (-22, 24, 0), (-32, 0, 0), (85, 0, 0)))
+TAKEOFF = merge(legs(-15, 10, 25, 30, 0.0), {"chest": (-5, 0, 0), "head": (-10, 0, 0)},
+                arm("R", (-130, 8, 0), (-15, 0, 0), (50, 0, 0)), arm("L", (-128, 20, 0), (-18, 0, 0), (50, 0, 0)))
+APEX = merge(OVERHEAD, AIR_LEGS, {"chest": (-24, 0, 0), "head": (-4, 0, 0)},
+             arm("R", (-175, 4, 0), (-20, 0, 0), (25, 0, 0)), arm("L", (-172, 16, 0), (-22, 0, 0), (25, 0, 0)))
+CLEAVE = merge(CHOP, legs(-40, 30, 10, 25, -0.02), {"chest": (32, 0, 0)})
+LANDED = merge(CHOP_LOW, legs(-65, 85, 40, 80, -0.3, fwd=0.12), {"chest": (42, 0, 0)})
+anim("greatsword_special", [
+    (0, STANCE_G), (5, CROUCH), (12, TAKEOFF), (20, APEX), ("h0-1", merge(APEX, {"chest": (-28, 0, 0)})),
+    ("h0+3", CLEAVE), ("h0+6", LANDED), ("h0e+14", LANDED), ("T", STANCE_G),
 ])
 
 missing = sorted(set(T) - set(markers))

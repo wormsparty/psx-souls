@@ -4,11 +4,12 @@
 
 use bevy::prelude::*;
 
-use super::data::{BossDef, BossMove, MoveDef, MoveRef, Side, Tuning};
+use super::data::{BossAttack, BossDef, BossMove, MoveDef, MoveRef, Side, Tuning};
 use super::encounter::Encounter;
 use super::fighter::{Action, Body, Health, Hitstop};
 use super::player::{Player, motion_speed, run_frame};
 use super::rng::SimRng;
+use super::world::{self, STEP_UP};
 use super::{DT, SimDebug, SimEvent, SimEvents, SimTick, math, spell};
 
 #[derive(Component, Clone, Debug)]
@@ -34,6 +35,12 @@ pub struct Boss {
     /// Offset (radians) between the aimed direction and the target, renewed from time to time.
     pub aim_offset: f32,
     pub aim_timer: u32,
+    /// Ticks the target has spent standing a step above it (gallery, stairs): past the patience
+    /// of its climbing jump (`BossAttack::climb`), it leaps up there.
+    pub below_target: u32,
+    /// Climbing jump in flight: heights at take-off and at landing. Floors and walls don't hold
+    /// it meanwhile; it sets foot at the end of the jump.
+    pub flight: Option<(f32, f32)>,
 }
 
 impl Boss {
@@ -53,6 +60,8 @@ impl Boss {
             turning: false,
             aim_offset: 0.0,
             aim_timer: 0,
+            below_target: 0,
+            flight: None,
         }
     }
 
@@ -125,6 +134,15 @@ pub fn boss_act(
                 .map(|(e, ..)| e)
         });
         let target_pos = boss.target.and_then(|e| players.get(e).ok()).map(|(_, b, _)| b.pos);
+        // Height of the target relative to the boss: a step above, it's out of reach.
+        let rise = target_pos.map_or(0.0, |tp| tp.y - body.pos.y);
+        boss.below_target = if rise > STEP_UP { boss.below_target + 1 } else { 0 };
+
+        // Climbing jump cut short (stagger, death): it falls back onto the nearest floor.
+        if boss.flight.is_some() && !action.mv.is_some_and(|mv| is_climb(t, mv)) {
+            boss.flight = None;
+            body.pos = world::landing(t, body.pos, body.radius, boss.arena);
+        }
 
         if let Some(mv) = action.mv {
             let def = t.get(mv);
@@ -136,6 +154,9 @@ pub fn boss_act(
                     action.target_dist = math::flat_len(tp - body.pos);
                 }
                 run_frame(&mut body, &action, def, target_pos, None);
+                if is_climb(t, mv) {
+                    fly(&mut boss, &mut body, def, &action, target_pos, t);
+                }
                 for h in def.hits.iter().filter(|h| h.aoe && h.start == action.tick) {
                     let (a, _, r) = super::combat::hit_capsule(&body, h, action.tick as f32);
                     events.push(SimEvent::Shockwave { pos: Vec3::new(a.x, body.pos.y, a.z), radius: r, boss: boss.def });
@@ -191,6 +212,13 @@ pub fn boss_act(
             continue;
         };
 
+        // Out of reach on another level: it jumps there (up, after a while; down, at once).
+        // Perched above its target, it waits at the edge for its jump.
+        let down = rise < -STEP_UP && world::perched(t, body.pos, boss.arena);
+        let waited = boss.below_target;
+        let climb = |a: &BossAttack| a.climb.is_some_and(|wait| down || (rise > STEP_UP && waited >= wait));
+        let climbing = bd.attacks.iter().any(|a| a.phases.contains(&boss.phase) && climb(a));
+
         // Approach: turn slowly towards the target, walk or circle around.
         let to = tp - body.pos;
         let dist = math::flat_len(to);
@@ -199,7 +227,9 @@ pub fn boss_act(
             lumber(&mut boss, &mut body, bd, want, dist, &mut rng);
         } else {
             body.yaw = math::turn_towards(body.yaw, want, bd.turn_rate.to_radians() * DT);
-            if bd.keep_away > 0.0 && dist < bd.keep_away {
+            if down {
+                // Waits at the edge of the gallery: it jumps down, it doesn't walk off it.
+            } else if bd.keep_away > 0.0 && dist < bd.keep_away {
                 // Spellcaster: it backs away facing the target.
                 let back = math::forward(body.yaw) * bd.walk_speed * DT;
                 body.pos -= back;
@@ -233,7 +263,11 @@ pub fn boss_act(
             .iter()
             .enumerate()
             .filter(|(i, a)| {
+                if climbing {
+                    return a.phases.contains(&phase) && climb(a) && angle <= a.max_angle;
+                }
                 a.phases.contains(&phase)
+                    && a.climb.is_none()
                     && boss.cooldowns[*i] <= now
                     && dist >= a.min_range
                     && dist <= a.max_range
@@ -257,6 +291,29 @@ pub fn boss_act(
             roll -= w;
         }
         start_attack(&mut boss, &mut body, &mut action, chosen, tp, t, now, &mut events, entity);
+    }
+}
+
+fn is_climb(t: &Tuning, mv: MoveRef) -> bool {
+    matches!(mv, MoveRef::BossAttack(d, i) if t.bosses[d as usize].attacks[i as usize].climb.is_some())
+}
+
+/// Climbing jump (after `run_frame`): from take-off to landing, the boss rises (or drops) from
+/// its floor to its target's, then sets foot on the nearest floor at that height.
+fn fly(boss: &mut Boss, body: &mut Body, def: &MoveDef, action: &Action, target: Option<Vec3>, t: &Tuning) {
+    let Some(m) = def.motion.iter().find(|m| m.to_target && m.retarget) else { return };
+    if action.tick == m.start {
+        let to = target.map_or(body.pos.y, |tp| {
+            world::floor_below(t, tp.x, tp.z, tp.y, Some(world::Mover::Climber(boss.arena))).unwrap_or(tp.y)
+        });
+        boss.flight = Some((body.pos.y, to));
+    }
+    let Some((from, to)) = boss.flight else { return };
+    let k = (action.tick + 1 - m.start) as f32 / (m.end - m.start).max(1) as f32;
+    body.pos.y = from + (to - from) * k.min(1.0);
+    if action.tick + 1 >= m.end {
+        boss.flight = None;
+        body.pos = world::landing(t, body.pos, body.radius, boss.arena);
     }
 }
 
@@ -340,7 +397,8 @@ pub fn aoe_lock_tick(def: &MoveDef, h: &super::data::HitWindow) -> u32 {
 }
 
 /// Area effect announced by the current action: ground centre at impact (extrapolating the
-/// remaining movement), radius, and wind-up progress (0 → 1 at impact).
+/// remaining movement) at the height of the boss's feet (of its landing during a climbing jump:
+/// see `Boss::flight`), radius, and wind-up progress (0 → 1 at impact).
 /// Used to draw the ground warning; `None` outside the wind-up or after the impact, and
 /// as long as the spot isn't fixed (the circle never follows the player).
 pub fn aoe_telegraph(body: &Body, action: &Action, t: &Tuning) -> Option<(Vec3, f32, f32)> {
@@ -360,7 +418,7 @@ pub fn aoe_telegraph(body: &Body, action: &Action, t: &Tuning) -> Option<(Vec3, 
     let at = Body { pos, ..*body };
     let (a, _, r) = super::combat::hit_capsule(&at, h, h.start as f32);
     let progress = ((action.tick - from) as f32 / (h.start - from).max(1) as f32).min(1.0);
-    Some((Vec3::new(a.x, 0.0, a.z), r, progress))
+    Some((Vec3::new(a.x, body.pos.y, a.z), r, progress))
 }
 
 /// True if the boss's current action contains a rage attack not yet triggered.

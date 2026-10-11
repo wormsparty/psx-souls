@@ -5,7 +5,17 @@ has come: it can now take any kind of game and render it in any style. This one 
 PlayStation 1-style action game with **7 tough bosses**, telegraphed attacks, perfect guards
 and nothing but your own skill to rely on.
 
-Will you make it to the end?
+# How I feel about the game
+
+- I really love the look and that the gameplay is belieable for the PSX for a souls-like
+- The main gameplay is mostly unchanged from the initial generation. Character animations are a little stiff, it could use some pulish.
+  Geometries in the overworld don't match, I can't decide if I should fix it manually or if it's part of the charm of the area.
+- Just name an existing boss from any game, and a low-poly boss with similar look and gameplay just appears in the game. It's that easy!
+  The Marionette was born by letting the AI free to come up with a boss and it is my favorite one.
+- Balancing is hard. I made bosses doable without items, but it may have become too easy or too hard by changes along the way
+- Feel free to do what you want with the project: I don't indend to update or do anything with it
+- Remember AI is a tool which can be used for good or evil. This prototype is a dream come true in the sense that I could never
+  make anything fun by myself, or it would so so much time it wasn't worth it. Now by imagination can come to live in an afternoon.
 
 ## At a glance
 
@@ -147,7 +157,8 @@ The encounters are in `assets/config/bosses.ron`, their arenas in `assets/config
   fireballs; ash rain in phase 2;
 - the Butcher and his two dogs: diagonal cleavers (left then right), leaning whirlwind
   at head height, head-down charge, cleave (shockwave), thrown cleaver; he leaps far back
-  then charges or throws a cleaver; frenzy in phase 2. The dogs only have a small health bar
+  then charges or throws a cleaver; frenzy in phase 2. Linger on the gallery and he leaps up
+  to crush you there, then jumps back down after you. The dogs only have a small health bar
   and collapse with their master;
 - the Wick-Trimmer and the Anvil: the Wick-Trimmer is a magician who keeps his distance and
   never stays still: he regularly slides sideways (glide), then often shoots from there
@@ -247,7 +258,8 @@ Spells, shockwaves and circles are all in the boss's colour (except the cleaver,
   defeated. When all are lit, the door swings open; beyond, a terrace and a sign
   ("Read").
 - **Galleries** (in the Slaughter Yard): stairs climb to a
-  raised floor where the bosses don't go. Walking off its edge, you jump down; striking during
+  raised floor where the bosses don't walk (the Butcher leaps onto it if you stay there ~2 s).
+  Walking off its edge, you jump down; striking during
   the drop is a **plunging attack** (×1.8 damage and stagger) if you started at least 1.8 m
   above the opponent. From below, a gallery is a wall.
 - **Pillars** stop projectiles (the Wick-Trimmer's glows, the wyvern's fireballs…).

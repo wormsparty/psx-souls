@@ -424,10 +424,27 @@ pub fn player_act(
         }
         // Jump: gravity applies whatever the state (hit, or even killed, mid-jump).
         // Landing (or falling into the void) is decided with the collisions.
-        if p.airborne {
-            p.air_vy -= GRAVITY * DT;
-            body.pos.y += p.air_vy * DT;
-            p.air_ticks += 1;
+        // A leaping attack (`Motion::lift`) drives the height itself, frozen during hitstop.
+        let lift = action.def(t).filter(|_| p.state == PState::Acting).and_then(|d| d.lift_at(action.tick));
+        match lift {
+            Some(_) if hitstop.0 > 0 => {}
+            Some(vy) if vy > 0.0 || p.airborne => {
+                if !p.airborne {
+                    p.airborne = true;
+                    p.air_from = body.pos.y;
+                    p.air_ticks = 0;
+                    p.vel = Vec3::ZERO;
+                }
+                p.air_vy = vy;
+                body.pos.y += vy * DT;
+                p.air_ticks += 1;
+            }
+            _ if p.airborne => {
+                p.air_vy -= GRAVITY * DT;
+                body.pos.y += p.air_vy * DT;
+                p.air_ticks += 1;
+            }
+            _ => {}
         }
         if p.state == PState::Dead {
             continue;
@@ -474,7 +491,11 @@ pub fn player_act(
                     MoveRef::Player(PlayerMove::GuardHit | PlayerMove::PerfectGuard)
                 );
                 if p.guard_held {
-                    if !from_guard {
+                    if matches!(mv, MoveRef::Weapon(..)) {
+                        // Guard held through an attack: the perfect window counts from the press,
+                        // so it's long gone unless the press came at the very end.
+                        p.guard_start = p.last_guard_press;
+                    } else if !from_guard {
                         p.guard_start = now;
                     }
                     p.state = PState::Guard;
@@ -508,6 +529,15 @@ pub fn player_act(
                         body.pos += p.vel * DT;
                     }
                     run_frame(&mut body, &action, def, locked_pos, move_dir);
+                    if let Some(h) = def.hits.iter().find(|h| h.slash && h.start == action.tick) {
+                        let c = &h.capsule;
+                        ctx.events.push(SimEvent::Slash {
+                            pos: body.pos,
+                            yaw: body.yaw,
+                            reach: c.a[2].max(c.b[2]) + c.r,
+                            top: c.a[1].max(c.b[1]) + c.r,
+                        });
+                    }
                     if def.walk > 0.0 {
                         // Slow walking allowed (heal).
                         if let Some(d) = move_dir {
@@ -623,7 +653,9 @@ fn try_defensive(p: &mut Player, body: &mut Body, action: &mut Action, ctx: &mut
         ctx.events.push(SimEvent::Dodge { entity: ctx.entity });
         return true;
     }
-    if p.guard_held && p.state != PState::Guard {
+    // No guard during an attack: only once it's over (dodge can still cancel it).
+    let attacking = matches!(action.mv, Some(MoveRef::Weapon(..)));
+    if p.guard_held && p.state != PState::Guard && !attacking {
         // Cancelling a guard reaction while still holding: same guard, no new perfect window.
         let from_guard = action.is(MoveRef::Player(PlayerMove::GuardHit))
             || action.is(MoveRef::Player(PlayerMove::PerfectGuard));

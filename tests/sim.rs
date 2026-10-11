@@ -659,6 +659,46 @@ fn a_plunging_attack_from_the_gallery_hits_harder() {
 }
 
 #[test]
+fn the_butcher_leaps_onto_the_gallery_after_a_while_and_back_down() {
+    let t = Tuning::builtin();
+    let butcher = t.encounters.iter().position(|e| e.members.iter().any(|m| m.boss == "butcher")).unwrap();
+    let a = t.arenas[butcher].clone();
+    let Some(Shape::Ellipse { center: [gx, gz], radii: [rx, rz], y: top }) = a.floors.iter().find(|f| f.ledge && matches!(f.shape, Shape::Ellipse { .. })).map(|f| f.shape) else {
+        panic!("no gallery");
+    };
+    let patience = t.bosses.iter().flat_map(|b| &b.attacks).find_map(|a| a.climb).expect("a climbing jump");
+    let mut app = App::new();
+    app.add_plugins(SimPlugin);
+    app.world_mut().resource_mut::<ResetFight>().progress = Some(Progress { arena: Some(butcher as u8), ..Progress::new_game(&t) });
+    steps(&mut app, 3, IDLE);
+    let p = player(&mut app);
+    let main = app.world_mut().query::<(Entity, &Boss)>().iter(app.world()).find(|(_, b)| !b.def(&t).minor).unwrap().0;
+    // The player stays put (unhurt) at `at`; returns the tick at which the butcher stands on its
+    // ground, at height `y`.
+    let wait_for = |app: &mut App, at: Vec3, y: f32, max: u32| {
+        for i in 0..max {
+            app.world_mut().get_mut::<Body>(p).unwrap().pos = at;
+            let mut h = app.world_mut().get_mut::<Health>(p).unwrap();
+            h.cur = h.max;
+            step(app, IDLE);
+            let b = body(app, main);
+            if (b.pos.y - y).abs() < 0.05 && app.world().get::<Boss>(main).unwrap().flight.is_none() {
+                return Some((i, b.pos));
+            }
+        }
+        None
+    };
+    let (up, pos) = wait_for(&mut app, Vec3::new(gx, top, gz), top, 900).expect("leapt onto the gallery");
+    assert!(up >= patience, "only after a while ({up} ticks)");
+    let (dx, dz) = ((pos.x - gx) / rx, (pos.z - gz) / rz);
+    assert!(dx * dx + dz * dz <= 1.0, "on the gallery ({pos:?})");
+    // The player drops back into the yard: it jumps down after them.
+    let yard = Vec3::new(a.boss_spawn[0], 0.0, a.boss_spawn[1]);
+    let (down, _) = wait_for(&mut app, yard, 0.0, 600).expect("jumped back down");
+    assert!(down < 240, "without delay ({down} ticks)");
+}
+
+#[test]
 fn death_respawns_at_checkpoint_with_items_refilled() {
     let mut app = new_app();
     let t = tuning(&app);
@@ -747,6 +787,34 @@ fn special_hits_do_not_refill_special_gauge() {
     let dealt = before - hp(&mut app, b);
     assert!(dealt >= 200.0, "the special must hurt: {dealt}");
     assert_eq!(app.world().get::<Player>(p).unwrap().special, 0.0);
+}
+
+#[test]
+fn greatsword_special_leaps_and_cleaves_far_ahead() {
+    let mut app = new_app();
+    let t = tuning(&app);
+    let (p, b) = (player(&mut app), boss(&mut app));
+    app.world_mut().get_mut::<Body>(p).unwrap().pos = Vec3::new(0.0, 0.0, 0.0);
+    app.world_mut().get_mut::<Body>(p).unwrap().yaw = 0.0;
+    // Well beyond a normal swing's reach.
+    app.world_mut().get_mut::<Body>(b).unwrap().pos = Vec3::new(0.0, 0.0, 5.0);
+    {
+        let mut pl = app.world_mut().get_mut::<Player>(p).unwrap();
+        pl.weapon = 1;
+        pl.special = t.player.special_max;
+    }
+    let before = hp(&mut app, b);
+    step(&mut app, PlayerInput { buttons: btn::SPECIAL, ..IDLE });
+    let mut peak: f32 = 0.0;
+    for _ in 0..30 {
+        step(&mut app, IDLE);
+        peak = peak.max(body(&mut app, p).pos.y);
+    }
+    assert!(peak > 1.2, "the player leaps: {peak}");
+    steps(&mut app, 60, IDLE);
+    assert!(!app.world().get::<Player>(p).unwrap().airborne);
+    assert!(body(&mut app, p).pos.y.abs() < 0.01, "back on the ground");
+    assert!(before - hp(&mut app, b) >= 300.0, "the cleave reaches far ahead");
 }
 
 #[test]
@@ -1724,4 +1792,23 @@ fn dead_hounds_do_not_shield_the_butcher() {
         _ => None,
     }).collect();
     assert_eq!(hits, vec![Some(main)]);
+}
+
+#[test]
+fn stuck_chasers_give_up_and_let_the_player_rest() {
+    // Everyone alerted, the player up at the Belvedere: those who can't reach them (the colossus
+    // at the foot of its stairs, a dog on its ledge…) end up going back to their post.
+    let mut app = fresh_app();
+    let t = tuning(&app);
+    let p = player(&mut app);
+    app.world_mut().get_mut::<Body>(p).unwrap().pos = checkpoint_spawn(&t, 1).0;
+    let mut q = app.world_mut().query::<&mut psx_souls::sim::enemy::Enemy>();
+    for mut e in q.iter_mut(app.world_mut()) {
+        e.state = psx_souls::sim::enemy::EState::Chase;
+        e.target = Some(p);
+    }
+    steps(&mut app, 2, IDLE);
+    assert!(app.world().resource::<Encounter>().hunted);
+    steps(&mut app, 600, IDLE);
+    assert!(!app.world().resource::<Encounter>().hunted);
 }

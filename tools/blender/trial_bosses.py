@@ -600,9 +600,18 @@ def horned_butcher():
     leap_back = [(0, BASE), (12, CROUCH), (16, lift(CROUCH, "hips", (0, 0, -0.08))), (26, LEAP),
                  (36, lift(LEAP, "hips", (0, 0, -0.6))), (42, CROUCH), (54, CROUCH), ("T", BASE)]
 
+    # Leap onto the gallery (or back down from it): the game raises him from one floor to the
+    # other along the jump; the hips add the arc. Cleavers overhead, he crashes down with both.
+    SOAR = merge(BASE, legs(-40, 80, -10, 60, 0.0), {"chest": (-16, 0, 0), "head": (-10, 0, 0)},
+                 arm("R", (-170, 10, 0), (-14, 0, 0), (40, 0, 0)), arm("L", (-170, -10, 0), (-14, 0, 0), (40, 0, 0)))
+    leap_slam = [(0, BASE), (28, CROUCH), (40, lift(CROUCH, "hips", (0, 0, -0.1))), (48, lift(SOAR, "hips", (0, 0, 1.2))),
+                 (58, lift(SOAR, "hips", (0, 0, 1.8))), (68, lift(SOAR, "hips", (0, 0, 1.0))),
+                 ("h0-2", lift(tween(SOAR, BOTH_DOWN, 0.5), "hips", (0, 0, 0.2))), ("h0", BOTH_DOWN), ("h0e+30", BOTH_DOWN),
+                 ("T", BASE)]
+
     finish(rig, "horned_butcher", cycle(BASE, 10, 200, idle), [
         ("walk", biped_walk(BASE, 84, 22), True), ("double_chop", double_chop), ("whirl", whirl), ("gore", gore),
-        ("leap_back", leap_back),
+        ("leap_back", leap_back), ("leap_slam", leap_slam),
         ("cleave", cleave), ("throw", throw), ("frenzy", frenzy),
     ] + biped_states(BASE, 1.75))
 

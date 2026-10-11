@@ -26,6 +26,9 @@ pub enum Mover {
     Player { zone: Zone, door_open: bool },
     /// The bosses of an arena (never on its ledges).
     Boss(u8),
+    /// A boss that jumped onto one of its arena's ledges: it walks on them too, but never off
+    /// their edge (it jumps back down).
+    Climber(u8),
     /// Path enemies: not in the corridors to the bosses, and they never jump into the void.
     Enemy,
 }
@@ -49,6 +52,7 @@ fn allowed(zone: Zone, f: &FloorDef, m: Mover) -> bool {
     match m {
         Mover::Player { zone: z, door_open } => zone == z && (door_open || !f.sealed),
         Mover::Boss(i) => zone == Zone::Arena(i) && !f.ledge,
+        Mover::Climber(i) => zone == Zone::Arena(i),
         Mover::Enemy => zone == Zone::Level && !f.arena && !f.sealed,
     }
 }
@@ -173,7 +177,7 @@ pub fn step(t: &Tuning, pos: Vec3, r: f32, m: Mover) -> Step {
         }
         let closed = if f.walled && m.is_player() { dead_ends(t, f, m) } else { [false; 2] };
         let fp = fit_ends(&f.shape, pos, margin(f, m, r), closed);
-        if fp.y > pos.y + STEP_UP {
+        if fp.y > pos.y + STEP_UP || (matches!(m, Mover::Climber(_)) && fp.y < pos.y - DROP) {
             continue;
         }
         if fp.dist <= EPS {
@@ -231,6 +235,24 @@ pub fn floor_below(t: &Tuning, x: f32, z: f32, near_y: f32, m: Option<Mover>) ->
         }
     }
     best
+}
+
+/// A boss standing a step above its arena's ground: on a gallery or the stairs, where only a
+/// climbing jump takes it.
+pub fn perched(t: &Tuning, pos: Vec3, arena: u8) -> bool {
+    floor_below(t, pos.x, pos.z, pos.y, Some(Mover::Boss(arena))).is_some_and(|g| pos.y > g + STEP_UP)
+}
+
+/// Where a boss of radius `r` jumping to `pos` sets foot: on the floor of its arena (ledges
+/// included) nearest to it, the difference in height counting as much as the distance — on the
+/// gallery it aimed for, and not at the foot of its wall.
+pub fn landing(t: &Tuning, pos: Vec3, r: f32, arena: u8) -> Vec3 {
+    let m = Mover::Climber(arena);
+    pieces(t)
+        .filter(|(z, f)| allowed(*z, f, m))
+        .map(|(_, f)| fit(&f.shape, pos, margin(f, m, r)))
+        .min_by(|a, b| (a.dist + (a.y - pos.y).abs()).total_cmp(&(b.dist + (b.y - pos.y).abs())))
+        .map_or(pos, |f| Vec3::new(f.point.x, f.y, f.point.z))
 }
 
 /// Zone of a position: the arena whose floors contain it, otherwise the level.

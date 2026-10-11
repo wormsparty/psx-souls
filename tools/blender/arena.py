@@ -764,7 +764,9 @@ VOID = material("a_void", (0.015, 0.012, 0.018))
 CLOTH = material("a_cloth", tex=tex_noise((0.3, 0.06, 0.05), 0.3, seed=60))
 ICE = material("a_ice", tex=tex_noise((0.55, 0.7, 0.8), 0.25, seed=61), emissive=(0.04, 0.07, 0.09))
 BURNT = material("a_burnt", tex=tex_noise((0.17, 0.14, 0.12), 0.5, seed=63))
-IRONPLATE = material("a_ironplate", tex=tex_noise((0.24, 0.22, 0.21), 0.35, seed=64, cells=(16, 16, 8)))
+# The foundry's floor: packed sand and soot. A large texture (8 m at the floor's scale) with
+# broad, soft variations, so that its repeats don't draw a grid in the round room.
+SAND = material("a_sand", tex=tex_noise((0.24, 0.22, 0.21), 0.35, seed=64, size=256, cells=(64, 16, 16, 8)), size=256)
 DARKBRICK = material("a_darkbrick", tex=tex_brick(seed=65, base=(0.26, 0.22, 0.22)))
 BLOOD = material("a_blood", (0.2, 0.02, 0.025))
 CURTAIN = material("a_curtain", tex=tex_stripes((0.45, 0.05, 0.06), (0.3, 0.03, 0.04), n=6, seed=66))
@@ -995,8 +997,10 @@ def ellipse_points(cx, cz, rx, rz, sides, phase=0.0):
     return [(cx + rx * math.cos(2 * math.pi * (k + phase) / sides), cz + rz * math.sin(2 * math.pi * (k + phase) / sides)) for k in range(sides)]
 
 
-def room_floor(mb, cx, cz, rx, rz, y, mat, out=1.0):
-    """Floor of an elliptical room, `out` beyond its edge (under the wall)."""
+def room_floor(mb, cx, cz, rx, rz, y, mat, out=1.0, tile=None):
+    """Floor of an elliptical room, `out` beyond its edge (under the wall). `tile`: UVs in world
+    coordinates, one texture repeat every `tile` metres, instead of one per ring segment (which
+    squeezes the texture towards the centre)."""
     bx, by, _ = B(cx, cz)
     k = rz / rx
     rings = [0.0]
@@ -1013,6 +1017,10 @@ def room_floor(mb, cx, cz, rx, rz, y, mat, out=1.0):
                 mb._face(v, mat, uvs=[(0.5, 0), (0, 1), (1, 1)])
         else:
             ring_quads(mb, r0, r1, y, mat, sides, cx=bx, cy=by, ry=k)
+    if tile:
+        for f in mb.bm.faces:
+            for loop in f.loops:
+                loop[mb.uv].uv = ((loop.vert.co.x - bx) / tile, (loop.vert.co.y - by) / tile)
 
 
 def room_wall(mb, cx, cz, rx, rz, door, hw, height, mat, seed, ruin=0.0, top=STONE, stage=False, bottom=0.0, merlons=False, low=None):
@@ -1169,13 +1177,13 @@ def arena_room(i, a):
     style = {
         "summit": dict(floor=FLOOR, wall=CASTLE, height=8.0, ruin=0.0, sky=DARKSTONE, tall=1.6, custom=True),
         "slaughter": dict(floor=DARKSTONE, wall=DARKBRICK, height=5.5, ruin=0.15, sky=DARKBRICK, tall=0.8),
-        "foundry": dict(floor=IRONPLATE, wall=DARKBRICK, height=6.0, ruin=0.1, sky=DARKBRICK, tall=1.2),
+        "foundry": dict(floor=SAND, wall=DARKBRICK, height=6.0, ruin=0.1, sky=DARKBRICK, tall=1.2, tile=8.0),
         "guignol": dict(floor=PLANKS, wall=DARKBRICK, height=7.0, ruin=0.05, sky=DARKSTONE, tall=1.0),
         "cistern": dict(floor=ICE, wall=DARKSTONE, height=6.0, ruin=0.1, sky=DARKSTONE, tall=0.9),
         "hearth": dict(floor=BURNT, wall=BURNT, height=4.5, ruin=0.5, sky=BURNT, tall=1.3, custom=True),
     }.get(theme, dict(floor=FLOOR, wall=BRICK, height=5.0, ruin=0.2, sky=DARKSTONE, tall=1.0))
     if not style.get("custom"):
-        obj(f"arena_{i}_floor", lambda mb: room_floor(mb, cx, cz, rx, rz, 0.0, style["floor"]))
+        obj(f"arena_{i}_floor", lambda mb: room_floor(mb, cx, cz, rx, rz, 0.0, style["floor"], tile=style.get("tile")))
         obj(f"arena_{i}_wall", lambda mb: room_wall(mb, cx, cz, rx, rz, a["door"], hw, style["height"], style["wall"], seed, style["ruin"],
                                                     stage=theme == "guignol"))
         obj(f"arena_{i}_base", lambda mb: room_base(mb, cx, cz, rx, rz, seed))

@@ -53,6 +53,10 @@ pub struct HitWindow {
     /// Hitstop ticks applied to both fighters on impact.
     #[serde(default = "default_hitstop")]
     pub hitstop: u8,
+    /// Player attack: a white slash is drawn in the air when the window opens, across the
+    /// vertical plane in front of them, as tall and as far as the capsule.
+    #[serde(default)]
+    pub slash: bool,
 }
 
 fn default_hitstop() -> u8 {
@@ -84,6 +88,11 @@ pub struct Motion {
     /// Lateral speed (m/s, positive = to the right): a side hop.
     #[serde(default)]
     pub side: f32,
+    /// Player: vertical speed (m/s) replacing gravity during the segment (0 = hanging in
+    /// the air). A positive one takes off from the ground; a negative one only applies in the
+    /// air, until landing.
+    #[serde(default)]
+    pub lift: Option<f32>,
 }
 
 /// Definition of an action (attack, dodge, reaction…).
@@ -119,9 +128,6 @@ pub struct MoveDef {
     pub hyperarmor: Option<[u32; 2]>,
     #[serde(default)]
     pub iframes: Option<[u32; 2]>,
-    /// Window during which an incoming hit is countered (longsword stance).
-    #[serde(default)]
-    pub counter: Option<[u32; 2]>,
     /// Spells cast during the action (bosses).
     #[serde(default)]
     pub casts: Vec<Cast>,
@@ -143,6 +149,10 @@ impl MoveDef {
     }
     pub fn in_window(w: Option<[u32; 2]>, tick: u32) -> bool {
         w.is_some_and(|[s, e]| tick >= s && tick < e)
+    }
+    /// Vertical speed imposed at `tick` (`Motion::lift`).
+    pub fn lift_at(&self, tick: u32) -> Option<f32> {
+        self.motion.iter().find(|m| tick >= m.start && tick < m.end && m.lift.is_some())?.lift
     }
     /// First active tick and end of the last hit, used to time the animation.
     pub fn strike_span(&self) -> Option<(u32, u32)> {
@@ -250,9 +260,6 @@ pub struct WeaponDef {
     pub charge_ticks: u32,
     pub charge_anim: String,
     pub special: MoveDef,
-    /// Riposte triggered if the special's `counter` window is hit.
-    #[serde(default)]
-    pub special_counter: Option<MoveDef>,
     pub fatal: MoveDef,
     /// Jump attack (attack during a jump): more damage, little stamina (the jump
     /// already cost some).
@@ -416,6 +423,12 @@ pub struct BossAttack {
     /// probabilities add up (≤ 1), the rest of the time it doesn't chain.
     #[serde(default)]
     pub next: Vec<(String, f32)>,
+    /// Jump between levels (onto a gallery, the stairs, and back down): its `to_target` +
+    /// `retarget` jump also follows the target's height. Chosen alone, whatever its cooldown and
+    /// range, once the target has stood a step above the boss for this many ticks; to come back
+    /// down, as soon as the target is below it. Never otherwise.
+    #[serde(default)]
+    pub climb: Option<u32>,
 }
 
 impl BossAttack {
@@ -940,9 +953,6 @@ impl Tuning {
                     WeaponMove::Heavy => &w.heavy,
                     WeaponMove::HeavyCharged => &w.heavy_charged,
                     WeaponMove::Special => &w.special,
-                    WeaponMove::SpecialCounter => {
-                        w.special_counter.as_ref().unwrap_or(&w.special)
-                    }
                     WeaponMove::Fatal => &w.fatal,
                     WeaponMove::Jump => &w.jump,
                 }
@@ -1003,7 +1013,6 @@ pub enum WeaponMove {
     Heavy,
     HeavyCharged,
     Special,
-    SpecialCounter,
     Fatal,
     Jump,
 }

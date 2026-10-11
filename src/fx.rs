@@ -43,6 +43,8 @@ pub struct SparkAssets {
     /// Projectile (sphere of radius 1), eruption column (cylinder of radius 1, height 1).
     orb: Handle<Mesh>,
     column: Handle<Mesh>,
+    /// White crescent in the vertical plane (x = 0), 1 m tall and 1 m deep, scaled to the cut.
+    crescent: Handle<Mesh>,
     /// Spell materials, per element: bright core, sparks, ground warning.
     spell: std::collections::HashMap<Element, SpellMats>,
     /// The same in each boss's colour (index of its definition): its spells, its
@@ -90,6 +92,8 @@ struct SpellVisual {
 #[derive(Component)]
 struct AoeMarker {
     fill: bool,
+    /// Height above the ground (the ring over the disc).
+    lift: f32,
 }
 
 /// Shockwave ring, which widens and fades after the impact.
@@ -100,6 +104,16 @@ struct Shock {
 }
 
 const SHOCK_LIFE: f32 = 0.35;
+
+/// White slash left in the air by a cut (`SimEvent::Slash`), fading out.
+#[derive(Component)]
+struct SlashTrail {
+    life: f32,
+    /// Scale when it appears (it widens slightly as it fades).
+    scale: Vec3,
+}
+
+const SLASH_LIFE: f32 = 0.35;
 
 #[derive(Component)]
 struct Particle {
@@ -140,7 +154,7 @@ impl Plugin for FxPlugin {
             .add_systems(Startup, setup)
             .add_systems(
                 Update,
-                (consume_events, update_particles, aoe_markers, update_shocks, ambient, spell_visuals).run_if(in_state(AppState::Playing)),
+                (consume_events, update_particles, aoe_markers, update_shocks, update_slashes, ambient, spell_visuals).run_if(in_state(AppState::Playing)),
             );
     }
 }
@@ -191,6 +205,7 @@ fn setup(
         disc: disc.clone(),
         orb: meshes.add(Sphere::new(1.0).mesh().ico(1).unwrap()),
         column: meshes.add(Cylinder::new(1.0, 1.0).mesh().resolution(10)),
+        crescent: meshes.add(crescent_mesh()),
         spell: [
             (Element::Fire, (1.0, 0.82, 0.4), (1.0, 0.35, 0.05), Color::srgba(1.0, 0.3, 0.05, 0.55)),
             (Element::Light, (1.0, 0.97, 0.85), (0.8, 0.75, 0.45), Color::srgba(0.95, 0.85, 0.5, 0.45)),
@@ -233,9 +248,40 @@ fn setup(
             MeshMaterial3d(mats.add(blend(color))),
             flat.with_translation(Vec3::Y * y),
             Visibility::Hidden,
-            AoeMarker { fill },
+            AoeMarker { fill, lift: y },
         ));
     }
+}
+
+/// Crescent of a vertical cut, seen from the side: an arc of ellipse from above the head
+/// (slightly behind) down to the ground ahead, thick in the middle and tapering at both ends.
+/// Local frame: z = forward, y = up, at most 1 m tall and 1 m ahead. Both faces are drawn.
+fn crescent_mesh() -> Mesh {
+    use bevy::asset::RenderAssetUsages;
+    use bevy::render::mesh::{Indices, PrimitiveTopology};
+    const N: u32 = 24;
+    let (cy, cz, ry, rz) = (0.18, 0.08, 0.82, 0.92);
+    let (from, to) = (100f32.to_radians(), (-45f32).to_radians());
+    let mut pos = Vec::new();
+    for i in 0..=N {
+        let f = i as f32 / N as f32;
+        let a = from + (to - from) * f;
+        let (s, c) = a.sin_cos();
+        let thick = 1.0 - 0.3 * (f * std::f32::consts::PI).sin();
+        pos.push([0.0, cy + ry * s, cz + rz * c]);
+        pos.push([0.0, cy + ry * thick * s, cz + rz * thick * c]);
+    }
+    let mut idx = Vec::new();
+    for i in 0..N {
+        let (o, i0, o1, i1) = (2 * i, 2 * i + 1, 2 * i + 2, 2 * i + 3);
+        idx.extend([o, i0, o1, o1, i0, i1, o, o1, i0, o1, i1, i0]);
+    }
+    let n = pos.len();
+    Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, pos)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[1.0, 0.0, 0.0]; n])
+        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.0, 0.0]; n])
+        .with_inserted_indices(Indices::U32(idx))
 }
 
 /// Materials of a spell: core `c` glowing with `glow`, translucent halo, sparks, shockwave.
@@ -313,6 +359,7 @@ pub fn consume_events(
     mut rig: ResMut<CameraRig>,
     mut fx: ResMut<FxState>,
     mut flashes: Query<&mut TintFlash>,
+    mut mats: ResMut<Assets<Ps1Material>>,
     transforms: Query<&GlobalTransform>,
     enemies: Query<&Enemy>,
     tuning: Res<Tuning>,
@@ -342,7 +389,7 @@ pub fn consume_events(
         let seed = seed.wrapping_add(k as u32 * 7919);
         fx.last.push(e);
         match e {
-            SimEvent::PerfectGuard { pos } | SimEvent::Counter { pos } => {
+            SimEvent::PerfectGuard { pos } => {
                 play(&mut commands, &sounds, "perfect_guard", 1.0);
                 burst(&mut commands, &sparks, &sparks.perfect, pos, 22, 6.0, seed, floor(pos));
                 fx.perfect_flash = 1.0;
@@ -370,6 +417,19 @@ pub fn consume_events(
             }
             SimEvent::Swing { heavy, .. } => {
                 play(&mut commands, &sounds, if heavy { "swing_heavy" } else { "swing" }, 0.5);
+            }
+            SimEvent::Slash { pos, yaw, reach, top } => {
+                // Its own material: it fades out on its own.
+                let mut m = Ps1Material::unlit(Color::srgba(1.0, 1.0, 1.0, 0.9));
+                m.alpha_mode = AlphaMode::Blend;
+                m.params.emissive = Vec4::new(0.8, 0.8, 0.8, 0.0);
+                let scale = Vec3::new(1.0, top, reach);
+                commands.spawn((
+                    Mesh3d(sparks.crescent.clone()),
+                    MeshMaterial3d(mats.add(m)),
+                    Transform::from_translation(pos).with_rotation(Quat::from_rotation_y(yaw)).with_scale(scale),
+                    SlashTrail { life: SLASH_LIFE, scale },
+                ));
             }
             SimEvent::Dodge { .. } => play(&mut commands, &sounds, "dodge", 0.5),
             SimEvent::Jumped { .. } => play(&mut commands, &sounds, "dodge", 0.3),
@@ -533,7 +593,12 @@ fn aoe_markers(
     mut mats: ResMut<Assets<Ps1Material>>,
     mut locked: Local<Option<(Entity, u32, Vec3)>>,
 ) {
-    let tele = bosses.iter().find_map(|(e, boss, b, a)| aoe_telegraph(b, a, &tuning).map(|t| (e, a.seq, boss.def(&tuning).color, t)));
+    let tele = bosses.iter().find_map(|(e, boss, b, a)| {
+        let (mut pos, r, k) = aoe_telegraph(b, a, &tuning)?;
+        // Climbing jump: the circle is where it lands (on the gallery, or down in the yard).
+        pos.y = boss.flight.map_or(pos.y, |(_, to)| to);
+        Some((e, a.seq, boss.def(&tuning).color, (pos, r, k)))
+    });
     // The spot is frozen as soon as it's shown: the circle no longer moves until the impact.
     let tele = tele.map(|(e, seq, color, (pos, r, k))| {
         let pos = match *locked {
@@ -555,6 +620,7 @@ fn aoe_markers(
         }
         let Some((pos, r, k, color)) = tele else { continue };
         tf.translation.x = pos.x;
+        tf.translation.y = pos.y + m.lift;
         tf.translation.z = pos.z;
         let s = if m.fill { r * k } else { r };
         tf.scale = Vec3::new(s, s, 1.0);
@@ -577,6 +643,26 @@ fn update_shocks(mut commands: Commands, time: Res<Time>, mut q: Query<(Entity, 
         let k = 1.0 - s.life / SHOCK_LIFE;
         let r = s.radius * (0.3 + 0.75 * k.sqrt());
         t.scale = Vec3::new(r, r, 1.0);
+    }
+}
+
+fn update_slashes(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut q: Query<(Entity, &mut SlashTrail, &mut Transform, &MeshMaterial3d<Ps1Material>)>,
+    mut mats: ResMut<Assets<Ps1Material>>,
+) {
+    for (e, mut s, mut t, mat) in &mut q {
+        s.life -= time.delta_secs();
+        if s.life <= 0.0 {
+            commands.entity(e).despawn();
+            continue;
+        }
+        let k = 1.0 - s.life / SLASH_LIFE;
+        t.scale = s.scale * (1.0 + 0.08 * k);
+        if let Some(mut m) = mats.get_mut(&mat.0) {
+            m.params.base_color.w = 0.9 * (1.0 - k * k);
+        }
     }
 }
 

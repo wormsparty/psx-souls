@@ -58,6 +58,10 @@ pub struct Enemy {
     pub unique: bool,
     /// Ticks elapsed since the end of the death animation.
     pub dead_ticks: u32,
+    /// Consecutive ticks the target has been out of reach (see `LOSE_TICKS`).
+    pub lost_ticks: u32,
+    /// Where it stood when it last made headway towards its target.
+    pub anchor: Vec3,
 }
 
 /// Delay between the end of the death animation and disappearing.
@@ -68,6 +72,13 @@ const SIGHT_DY: f32 = 3.0;
 const SIGHT_ANGLE: f32 = 70.0;
 /// Within this range, a watching enemy hears the player even behind its back.
 const HEAR_RANGE: f32 = 3.0;
+/// A chasing enemy whose target stays out of reach (beyond `sight`, or on another level), or
+/// that can't get any closer (stuck against a wall, at the foot of stairs it may not climb),
+/// this long gives up and goes back to its post: otherwise it would chase forever, out of
+/// sight, and forbid resting.
+const LOSE_TICKS: u32 = 180;
+/// Distance an approaching enemy must cover to count as making headway.
+const HEADWAY: f32 = 1.0;
 
 impl Enemy {
     /// Takes a hit: chases the attacker, alerts the group, and is staggered if the
@@ -78,6 +89,7 @@ impl Enemy {
         }
         self.state = EState::Chase;
         self.target = Some(attacker);
+        self.lost_ticks = 0;
         self.poise += amount;
         self.poise_timer = 60;
         let def = &t.enemies[self.kind as usize];
@@ -131,6 +143,8 @@ pub fn spawn_all(commands: &mut Commands, t: &Tuning, slain: u64) {
                 group: s.group,
                 unique: s.unique,
                 dead_ticks: 0,
+                lost_ticks: 0,
+                anchor: pos,
             },
         ));
     }
@@ -287,10 +301,22 @@ pub fn enemy_act(
                     e.target = Some(p.0);
                     Some(p.1.pos)
                 });
-                let too_far = math::flat_len(body.pos - e.home) > d.leash;
+                let out_of_reach = tp.is_some_and(|tp| {
+                    let dist = math::flat_len(tp - body.pos);
+                    let stuck = dist > d.preferred_range + 0.6 && math::flat_len(body.pos - e.anchor) < HEADWAY;
+                    stuck || dist > d.sight || (tp.y - body.pos.y).abs() > SIGHT_DY
+                });
+                if out_of_reach {
+                    e.lost_ticks += 1;
+                } else {
+                    e.lost_ticks = 0;
+                    e.anchor = body.pos;
+                }
+                let too_far = math::flat_len(body.pos - e.home) > d.leash || e.lost_ticks >= LOSE_TICKS;
                 let Some(tp) = tp.filter(|_| !too_far) else {
                     e.state = EState::Return;
                     e.target = None;
+                    e.lost_ticks = 0;
                     continue;
                 };
                 let to = tp - body.pos;
@@ -376,6 +402,7 @@ fn wake(e: &mut Enemy, action: &mut Action, target: Entity, events: &mut SimEven
     e.state = EState::Chase;
     e.target = Some(target);
     e.alerted = true;
+    e.lost_ticks = 0;
     if action.mv.is_none() {
         action.start(MoveRef::Enemy(e.kind, EnemyMove::Alert), 0.0);
         events.push(SimEvent::EnemyAlert { entity });

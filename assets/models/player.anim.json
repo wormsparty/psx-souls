@@ -31,16 +31,6 @@
    54
   ]
  },
- "greatsword_counter": {
-  "frames": 48.0,
-  "loop": false,
-  "marks": [
-   0,
-   10,
-   16,
-   48
-  ]
- },
  "greatsword_fatal": {
   "frames": 104.0,
   "loop": false,
@@ -112,13 +102,13 @@
   ]
  },
  "greatsword_special": {
-  "frames": 80.0,
+  "frames": 78.0,
   "loop": false,
   "marks": [
    0,
-   39,
-   45,
-   80
+   28,
+   36,
+   78
   ]
  },
  "guard": {

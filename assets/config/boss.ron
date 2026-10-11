@@ -3,7 +3,7 @@
 // Shockwaves and jumps force it to move around and keep the player moving.
 (
     name: (en: "The Carousel Automaton", fr: "L'Automate du Carrousel"),
-    max_hp: 3800,
+    max_hp: 5320,
     phase2_at: 0.5,
     radius: 0.9,
     height: 3.2,

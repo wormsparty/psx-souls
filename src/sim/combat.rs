@@ -57,7 +57,10 @@ pub fn separate_bodies(
         let door_open = encounter::door_open(t, enc.defeated);
         let mover = match (&player, boss) {
             (Some(p), _) => Mover::Player { zone: p.zone, door_open },
-            (None, Some(b)) => Mover::Boss(b.arena),
+            // Climbing jump in flight: over walls and floors, it lands at the end (`boss_act`).
+            (None, Some(bs)) if bs.flight.is_some() => continue,
+            (None, Some(bs)) if world::perched(t, b.pos, bs.arena) => Mover::Climber(bs.arena),
+            (None, Some(bs)) => Mover::Boss(bs.arena),
             (None, None) => Mover::Enemy,
         };
         if let Some(p) = player.as_mut().filter(|p| p.airborne) {
@@ -293,7 +296,7 @@ pub fn resolve_hits(
             }
             // Special attack and fatal blow hits don't recharge the gauge (otherwise the special,
             // which staggers, would pay for itself through the fatal blow that follows).
-            if !matches!(hit.mv, MoveRef::Weapon(_, WeaponMove::Special | WeaponMove::SpecialCounter | WeaponMove::Fatal)) {
+            if !matches!(hit.mv, MoveRef::Weapon(_, WeaponMove::Special | WeaponMove::Fatal)) {
                 p.special += dmg * t.player.special_per_damage;
             }
             pstop.0 = pstop.0.max(h.hitstop);
@@ -328,7 +331,7 @@ pub fn resolve_hits(
                 // I-frames don't consume the hit: it can land later in the window.
                 Struck::Dodged => continue,
                 Struck::Parried => {
-                    // Perfect guard or counter: boss stagger; an enemy is staggered (unless
+                    // Perfect guard: boss stagger; an enemy is staggered (unless
                     // it has enough poise: it loses a lot of it).
                     fstop.0 = g.perfect_hitstop;
                     if foe_stagger(boss.as_deref_mut(), enemy.as_deref_mut(), pe, g.perfect_stagger, g.perfect_stagger * 5.0, &mut fact, t) {
@@ -363,13 +366,13 @@ impl Blow {
 pub enum Struck {
     /// I-frames: the hit goes through.
     Dodged,
-    /// Perfect guard or stance counter.
+    /// Perfect guard.
     Parried,
     Guarded,
     Hit,
 }
 
-/// Applies a hit coming from `from` to the player: counter, perfect guard, guard, or damage and
+/// Applies a hit coming from `from` to the player: perfect guard, guard, or damage and
 /// reaction. Doesn't touch the attacker (stagger, hitstop), left to the caller.
 #[allow(clippy::too_many_arguments)]
 pub fn strike_player(
@@ -392,17 +395,6 @@ pub fn strike_player(
     let facing = math::wrap(to_attacker - pbody.yaw).abs() <= t.player.guard.arc.to_radians();
     let g = &t.player.guard;
     let damage = blow.damage * p.defense_mult();
-
-    // Stance counter (longsword special). A shockwave can't be countered.
-    if let (Some(MoveRef::Weapon(w, WeaponMove::Special)), false) = (pact.mv, blow.aoe) {
-        let def = t.get(MoveRef::Weapon(w, WeaponMove::Special));
-        if facing && MoveDef::in_window(def.counter, pact.tick) && t.weapons[w as usize].special_counter.is_some() {
-            force_move(p, pact, MoveRef::Weapon(w, WeaponMove::SpecialCounter));
-            pstop.0 = g.perfect_hitstop;
-            events.push(SimEvent::Counter { pos });
-            return Struck::Parried;
-        }
-    }
 
     let in_guard = p.state == PState::Guard
         || pact.is(MoveRef::Player(PlayerMove::GuardHit))

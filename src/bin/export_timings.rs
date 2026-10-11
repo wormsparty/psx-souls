@@ -13,7 +13,6 @@ fn mv(d: &MoveDef) -> Value {
         "hits": d.hits.iter().map(|h| [h.start, h.end]).collect::<Vec<_>>(),
         "motion": d.motion.iter().map(|m| json!({"start": m.start, "end": m.end, "speed": m.speed})).collect::<Vec<_>>(),
         "iframes": d.iframes,
-        "counter": d.counter,
         "casts": d.casts.iter().map(|c| c.at).collect::<Vec<_>>(),
     })
 }
@@ -28,7 +27,6 @@ fn main() {
     for w in &t.weapons {
         let mut all: Vec<&MoveDef> = w.light.iter().collect();
         all.extend([&w.heavy, &w.heavy_charged, &w.special, &w.fatal, &w.jump]);
-        all.extend(w.special_counter.iter());
         for d in all {
             player.insert(d.anim.clone(), mv(d));
         }

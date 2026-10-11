@@ -89,6 +89,16 @@
    64
   ]
  },
+ "leap_slam": {
+  "frames": 136.0,
+  "loop": false,
+  "marks": [
+   0,
+   76,
+   84,
+   136
+  ]
+ },
  "roar": {
   "frames": 110.0,
   "loop": false,

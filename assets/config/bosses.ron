@@ -24,6 +24,10 @@
 // - motion.turn: rotation in place during the segment (degrees, positive = to the left).
 // - heading_slack: large beast that doesn't aim exactly at its target (degrees of tolerance);
 //   it only turns when the target leaves this cone, and only advances when facing it.
+// - climb: jump between levels (its `to_target` + `retarget` jump also follows the target's
+//   height). After the target has stood this many ticks on a gallery or the stairs above the boss,
+//   it's the only attack it chooses (whatever its range and cooldown); perched up there, it jumps
+//   back down at once when the target is below. Never chosen otherwise.
 (
     encounters: [
         (name: (en: "The Soot Wyvern", fr: "La Vouivre de Suie"),
@@ -260,6 +264,18 @@
                         motion: [(start: 16, end: 40, speed: -15.0)],
                     ),
                     next: [("charge", 0.5), ("lancer", 0.5)],
+                ),
+                (
+                    // The target lingers on the gallery or the stairs, out of reach: he leaps up
+                    // there to crush it, and comes back down the same way.
+                    name: "saut_galerie",
+                    min_range: 0, max_range: 16, max_angle: 50, weight: 1, cooldown: 0, phases: [1, 2], climb: 126,
+                    mv: (
+                        anim: "leap_slam", total: 136, track_until: 40, track_rate: 160, hyperarmor: (20, 76),
+                        motion: [(start: 40, end: 76, speed: 16.0, to_target: true, retarget: true, stop_dist: 0.0)],
+                        hits: [(start: 76, end: 84, damage: 140, hitstop: 8, reaction: Heavy, aoe: true,
+                                capsule: (a: (0.0, 0.3, 0.0), b: (0.0, 0.3, 0.0), r: 2.2))],
+                    ),
                 ),
                 (
                     // Throws a cleaver that flies towards its target (and returns to his hand).

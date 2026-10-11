@@ -55,8 +55,10 @@ pub enum SimEvent {
     Guard { pos: Vec3 },
     PerfectGuard { pos: Vec3 },
     GuardBreak { pos: Vec3 },
-    Counter { pos: Vec3 },
     Swing { entity: Entity, heavy: bool },
+    /// White slash in the air (`HitWindow::slash`): from `pos`, facing `yaw`, up to `top` metres
+    /// high and `reach` metres ahead.
+    Slash { pos: Vec3, yaw: f32, reach: f32, top: f32 },
     Dodge { entity: Entity },
     FuryWarn { entity: Entity },
     /// Impact of an area attack (`aoe`): ground centre and radius. `boss`: the boss's
@@ -367,6 +369,8 @@ pub fn state_hash(world: &mut World) -> u64 {
     for b in qb.iter(world) {
         b.stagger.to_bits().hash(&mut h);
         b.phase.hash(&mut h);
+        b.below_target.hash(&mut h);
+        b.flight.map(|(a, b)| (a.to_bits(), b.to_bits())).hash(&mut h);
     }
     let mut qs = world.query::<&spell::Spell>();
     for s in qs.iter(world) {
