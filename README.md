@@ -7,15 +7,15 @@ and nothing but your own skill to rely on.
 
 # How I feel about the game
 
-- I really love the look and that the gameplay is belieable for the PSX for a souls-like
-- The main gameplay is mostly unchanged from the initial generation. Character animations are a little stiff, it could use some pulish.
-  Geometries in the overworld don't match, I can't decide if I should fix it manually or if it's part of the charm of the area.
-- Just name an existing boss from any game, and a low-poly boss with similar look and gameplay just appears in the game. It's that easy!
-  The Marionette was born by letting the AI free to come up with a boss and it is my favorite one.
-- Balancing is hard. I made bosses doable without items, but it may have become too easy or too hard by changes along the way
-- Feel free to do what you want with the project: I don't indend to update or do anything with it
-- Remember AI is a tool which can be used for good or evil. This prototype is a dream come true in the sense that I could never
-  make anything fun by myself, or it would so so much time it wasn't worth it. Now by imagination can come to live in an afternoon.
+- I really love the look, and that the gameplay is believable for a PSX souls-like.
+- The main gameplay is mostly unchanged from the initial generation. Character animations are a little stiff; they could use some polish.
+  Geometries in the overworld don't match; I can't decide if I should fix them manually or if it's part of the charm of the area.
+- Just name an existing boss from any game, and a low-poly boss with a similar look and gameplay appears in the game. It's that easy!
+  The Marionette was born by leaving the AI free to come up with a boss, and it is my favourite one.
+- Balancing is hard. I made the bosses doable without items, but they may have become too easy or too hard through changes along the way.
+- Feel free to do what you want with the project: I don't intend to update it or do anything with it.
+- Remember, AI is a tool which can be used for good or evil. This prototype is a dream come true in the sense that I could never
+  make anything fun by myself, or it would take so much time it wouldn't be worth it. Now my imagination can come to life in an afternoon.
 
 ## At a glance
 
