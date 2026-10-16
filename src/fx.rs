@@ -362,6 +362,7 @@ pub fn consume_events(
     mut mats: ResMut<Assets<Ps1Material>>,
     transforms: Query<&GlobalTransform>,
     enemies: Query<&Enemy>,
+    local: Query<(), With<crate::render::LocalPlayer>>,
     tuning: Res<Tuning>,
     time: Res<Time>,
     mut heard: Local<Vec<u32>>,
@@ -458,7 +459,13 @@ pub fn consume_events(
                 rig.shake = rig.shake.max(1.0);
             }
             SimEvent::BossDied => play(&mut commands, &sounds, "slam", 1.0),
-            SimEvent::PlayerDied => play(&mut commands, &sounds, "slam", 0.8),
+            SimEvent::PlayerDied { .. } => play(&mut commands, &sounds, "slam", 0.8),
+            SimEvent::Revived { entity } => {
+                play(&mut commands, &sounds, "heal", 0.9);
+                if local.contains(entity) {
+                    rig.initialized = false;
+                }
+            }
             SimEvent::WeaponSwitched { .. } => play(&mut commands, &sounds, "switch", 0.6),
             SimEvent::Heal { entity } => {
                 play(&mut commands, &sounds, "heal", 0.8);
@@ -480,9 +487,11 @@ pub fn consume_events(
                 let m = sparks.torch.get(arena as usize).unwrap_or(&sparks.ember).clone();
                 spray(&mut commands, &sparks, &m, at, 40, 2.5, seed, floor(at), true);
             }
-            SimEvent::Passage { .. } => {
+            SimEvent::Passage { entity, .. } => {
                 play(&mut commands, &sounds, "dodge", 0.7);
-                rig.initialized = false;
+                if local.contains(entity) {
+                    rig.initialized = false;
+                }
             }
             SimEvent::DoorOpened => play(&mut commands, &sounds, "guard_break", 0.9),
             SimEvent::TorchTouched { .. } => {}
@@ -512,7 +521,7 @@ pub fn consume_events(
                     }
                 }
             }
-            SimEvent::Kindled { checkpoint } => {
+            SimEvent::Kindled { checkpoint, .. } => {
                 play(&mut commands, &sounds, "kindle", 1.0);
                 let at = encounter::checkpoint_pos(&tuning, checkpoint as usize) + Vec3::Y * 1.9;
                 spray(&mut commands, &sparks, &sparks.ember, at, 40, 2.5, seed, floor(at), true);

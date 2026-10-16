@@ -9,6 +9,8 @@
 //! Actions run with full access to the world (`handle`), which allows starting
 //! a game, saving or applying equipment directly.
 
+use bevy::input::ButtonState;
+use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::prelude::*;
 use bevy::text::LineBreak;
 use bevy::window::{CursorGrabMode, CursorOptions, Monitor, PrimaryMonitor, PrimaryWindow};
@@ -24,7 +26,7 @@ use crate::settings::{
     windowed_sizes,
 };
 use crate::sim::data::Tuning;
-use crate::sim::encounter::{Encounter, Progress, SimCommand, SimCommands, apply_commands, near_checkpoint};
+use crate::sim::encounter::{Encounter, Progress, SimCommand, SimCommands, near_checkpoint};
 use crate::sim::fighter::Body;
 use crate::sim::items::{Item, Kind, QUICK_SLOTS};
 use crate::sim::player::Player;
@@ -35,6 +37,8 @@ use crate::ui::{Glyph, Hint, Icons, PixelSize, PixelText, Seg, UiFont, hint_node
 
 /// The project's repository ("Fork me" badge of the title screen).
 pub const REPO_URL: &str = "https://github.com/wormsparty/retro-souls";
+/// Longest co-op password.
+const PASSWORD_MAX: usize = 20;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Page {
@@ -55,6 +59,9 @@ pub enum Page {
     Choose,
     Options,
     Help,
+    /// Online co-op, from a brazier: optional password, then the search (`true`: as the host,
+    /// otherwise to join one).
+    Online(bool),
     /// Language choice on first launch.
     Language,
     /// Graphics style choice (PS1 or modern) on first launch.
@@ -82,11 +89,13 @@ pub struct MenuState {
     choosing: u8,
     /// Boss whose torch is being rekindled (`Revive` page).
     reviving: u8,
+    /// Co-op password being typed (`Online` page).
+    password: String,
 }
 
 impl Default for MenuState {
     fn default() -> Self {
-        Self { open: false, page: Page::Pause, stack: Vec::new(), selected: 0, repeat: 0.0, fresh: false, cursor: None, settle: 0.0, choosing: 0, reviving: 0 }
+        Self { open: false, page: Page::Pause, stack: Vec::new(), selected: 0, repeat: 0.0, fresh: false, cursor: None, settle: 0.0, choosing: 0, reviving: 0, password: String::new() }
     }
 }
 
@@ -138,6 +147,13 @@ enum Act {
     Back,
     ToTitle,
     Quit,
+    /// At a brazier: host a co-op game, join one (the password page).
+    OnlineHost,
+    OnlineJoin,
+    /// Starts the search (password page).
+    Search,
+    /// Ends the co-op: the host stays, the guest goes back to their world.
+    LeaveCoop,
 }
 
 /// Setting option.
@@ -181,6 +197,8 @@ enum Entry {
     Style(u32),
     /// Line of the character sheet, not selectable.
     Stat(Stat),
+    /// Co-op password (typed on the keyboard).
+    Password,
 }
 
 /// Line of the character sheet (status page).
@@ -237,6 +255,8 @@ struct PageCtx {
     /// Owned items (bits, in the order of `Item::ALL`), and slot being chosen.
     owned: u16,
     choosing: u8,
+    /// In a co-op game.
+    coop: bool,
 }
 
 fn owned_bits(p: Option<&Player>) -> u16 {
@@ -331,12 +351,20 @@ fn entries(page: Page, c: &PageCtx) -> Vec<Entry> {
         // With a save, "Continue" comes first (default choice).
         Page::Title if c.has_save => vec![Entry::Act(Load), Entry::Act(NewGame), Entry::Act(Open(Page::Options))],
         Page::Title => vec![Entry::Act(NewGame), Entry::Act(Load), Entry::Act(Open(Page::Options))],
+        Page::Online(_) => vec![Entry::Password, Entry::Act(Search), Entry::Act(Back)],
         Page::ConfirmNew => vec![Entry::Act(Back), Entry::Act(ConfirmNew)],
         // Icons: the equipment, then the system (cogwheel).
         Page::Pause => vec![Entry::Act(Open(Page::Equipment)), Entry::Act(Open(Page::Status)), Entry::Act(Open(Page::System))],
         Page::System => vec![Entry::Act(Open(Page::Options)), Entry::Act(Open(Page::Help)), Entry::Act(ToTitle)],
         // "Leave" first: it's the line selected on opening.
-        Page::Checkpoint => vec![Entry::Act(Leave), Entry::Act(Open(Page::Travel)), Entry::Act(Open(Page::Equipment))],
+        Page::Checkpoint if c.coop => vec![Entry::Act(Leave), Entry::Act(Open(Page::Travel)), Entry::Act(Open(Page::Equipment)), Entry::Act(LeaveCoop)],
+        Page::Checkpoint => vec![
+            Entry::Act(Leave),
+            Entry::Act(Open(Page::Travel)),
+            Entry::Act(Open(Page::Equipment)),
+            Entry::Act(OnlineHost),
+            Entry::Act(OnlineJoin),
+        ],
         Page::Travel => (0..32u8).filter(|i| c.found & (1 << i) != 0).map(Entry::Place).chain([Entry::Act(Back)]).collect(),
         // Grids: go back with Esc / (B).
         Page::Revive => vec![Entry::Boss(c.reviving)],
@@ -396,6 +424,10 @@ fn act_label(a: Act) -> &'static str {
         Act::Open(Page::Help) => tr("Help", "Aide"),
         Act::Open(Page::Travel) => tr("Travel", "Voyager"),
         Act::Open(_) => "…",
+        Act::OnlineHost => tr("Host online", "Héberger en ligne"),
+        Act::OnlineJoin => tr("Join online", "Rejoindre en ligne"),
+        Act::Search => tr("Search", "Lancer la recherche"),
+        Act::LeaveCoop => tr("Leave the co-op", "Quitter la coopération"),
         Act::Back => tr("Back", "Retour"),
         Act::ToTitle => tr("Return to title screen", "Retour à l'écran titre"),
         Act::Quit => tr("Quit game", "Quitter le jeu"),
@@ -436,6 +468,8 @@ fn page_title(p: Page, device: Device) -> &'static str {
         Page::Help => tr("HELP — KEYBOARD AND MOUSE", "AIDE — CLAVIER ET SOURIS"),
         Page::Language => "LANGUAGE / LANGUE",
         Page::Style => tr("GRAPHICS STYLE", "STYLE GRAPHIQUE"),
+        Page::Online(true) => tr("HOST ONLINE", "HÉBERGER EN LIGNE"),
+        Page::Online(false) => tr("JOIN ONLINE", "REJOINDRE EN LIGNE"),
     }
 }
 
@@ -457,6 +491,10 @@ fn page_info(p: Page) -> &'static str {
             "Talisman et armes, puis les emplacements rapides (« Objet suivant » passe de l'un à l'autre en jeu). Choisir un emplacement pour le changer.",
         ),
         Page::Choose => tr("What goes in this slot.", "Ce que contiendra cet emplacement."),
+        Page::Online(_) => tr(
+            "Optional password: only a player with the same one will find you. Empty: anyone. Searching for 2 minutes at most.",
+            "Mot de passe facultatif : seul un joueur avec le même vous trouvera. Vide : n'importe qui. Recherche pendant 2 minutes au plus.",
+        ),
         _ => "",
     }
 }
@@ -1028,6 +1066,13 @@ fn close(w: &mut World) {
     cursor_free(w, false);
 }
 
+/// Closes the menu (the co-op game starts).
+pub fn close_menu(w: &mut World) {
+    close(w);
+}
+
+
+
 /// Title screen: no more fighters in the world.
 pub fn enter_title(mut commands: Commands) {
     commands.queue(|w: &mut World| {
@@ -1077,7 +1122,7 @@ pub fn launch(w: &mut World, how: Launch) {
             slot.store(SaveData { version: crate::save::VERSION, play_time, progress: progress.clone() });
         }
     }
-    *w.resource_mut::<ResetFight>() = ResetFight { requested: true, players: 1, progress: Some(progress) };
+    *w.resource_mut::<ResetFight>() = ResetFight { requested: true, players: 1, progress: Some(progress), guests: Vec::new() };
     w.resource_mut::<NextState<AppState>>().set(AppState::Playing);
     close(w);
 }
@@ -1105,6 +1150,8 @@ fn open_on_rest(mut commands: Commands, fx: Res<FxState>, local: Query<(), With<
 enum Intent {
     /// Open the pause menu.
     Pause,
+    /// Give up looking for a co-op partner.
+    CancelSearch,
     /// Previous page (or close).
     Back,
     /// Close the menu (Start).
@@ -1129,6 +1176,8 @@ fn menu_input(
     pressed: Query<(&Row, &Interaction), Changed<Interaction>>,
     arrows: Query<(&Arrow, &Interaction), Changed<Interaction>>,
     mut menu: ResMut<MenuState>,
+    mut typed: MessageReader<KeyboardInput>,
+    net: Res<crate::net::Net>,
 ) {
     let cursor = window.cursor_position();
     let moved = menu.settle <= 0.0 && matches!((menu.cursor, cursor), (Some(a), Some(b)) if a.distance(b) > 0.5);
@@ -1141,12 +1190,38 @@ fn menu_input(
         return;
     }
     let mut out = Vec::new();
-    let k = |codes: &[KeyCode]| codes.iter().any(|c| keys.just_pressed(*c));
     let pad = |b: GamepadButton| gamepads.iter().any(|g| g.just_pressed(b));
     let esc = keys.just_pressed(KeyCode::Escape);
     let start = pad(GamepadButton::Start) || pad(GamepadButton::Select);
+    // The password page takes the keyboard's letters: only the arrows and Enter navigate.
+    let typing = menu.open && matches!(menu.page, Page::Online(_));
+    let letters = |l: KeyCode| if typing { None } else { Some(l) };
+    let k = |codes: &[Option<KeyCode>]| codes.iter().flatten().any(|c| keys.just_pressed(*c));
+    if typing {
+        for ev in typed.read().filter(|e| e.state == ButtonState::Pressed) {
+            match &ev.logical_key {
+                Key::Backspace => {
+                    menu.password.pop();
+                }
+                Key::Character(c) => {
+                    for ch in c.chars().filter(|ch| !ch.is_control()) {
+                        if menu.password.chars().count() < PASSWORD_MAX {
+                            menu.password.push(ch);
+                        }
+                    }
+                }
+                Key::Space if menu.password.chars().count() < PASSWORD_MAX => menu.password.push(' '),
+                _ => {}
+            }
+        }
+    } else {
+        typed.clear();
+    }
     if !menu.open {
-        if (esc || start) && *state.get() == AppState::Playing {
+        // Searching for a partner: Esc / Start / (B) give up instead of pausing.
+        if net.searching() && (esc || start || pad(GamepadButton::East)) {
+            out.push(Intent::CancelSearch);
+        } else if (esc || start) && *state.get() == AppState::Playing {
             out.push(Intent::Pause);
         }
     } else {
@@ -1155,19 +1230,19 @@ fn menu_input(
         } else if start {
             out.push(Intent::Close);
         }
-        if k(&[KeyCode::ArrowUp, KeyCode::KeyW]) {
+        if k(&[Some(KeyCode::ArrowUp), letters(KeyCode::KeyW)]) {
             out.push(Intent::Move(-1));
         }
-        if k(&[KeyCode::ArrowDown, KeyCode::KeyS]) {
+        if k(&[Some(KeyCode::ArrowDown), letters(KeyCode::KeyS)]) {
             out.push(Intent::Move(1));
         }
-        if k(&[KeyCode::ArrowLeft, KeyCode::KeyA]) {
+        if k(&[Some(KeyCode::ArrowLeft), letters(KeyCode::KeyA)]) {
             out.push(Intent::Change(-1));
         }
-        if k(&[KeyCode::ArrowRight, KeyCode::KeyD]) {
+        if k(&[Some(KeyCode::ArrowRight), letters(KeyCode::KeyD)]) {
             out.push(Intent::Change(1));
         }
-        if k(&[KeyCode::Enter, KeyCode::Space]) || pad(GamepadButton::South) {
+        if k(&[Some(KeyCode::Enter), letters(KeyCode::Space)]) || pad(GamepadButton::South) {
             out.push(Intent::Confirm);
         }
         // Gamepad: D-pad or stick, with repeat when held.
@@ -1244,19 +1319,22 @@ fn page_ctx(w: &mut World) -> PageCtx {
         device: *w.resource::<Device>(),
         found,
         here,
+        coop: w.resource::<crate::net::Net>().coop(),
     }
 }
 
 /// Checkpoints discovered by the local player, and the one they're near.
 fn local_place(w: &mut World) -> (u32, Option<u8>) {
     let t = w.resource::<Tuning>().clone();
+    let local = w.resource::<crate::net::LocalId>().0;
     let mut q = w.query::<(&Player, &Body)>();
-    q.iter(w).min_by_key(|(p, _)| p.id).map_or((0, None), |(p, b)| (p.found, near_checkpoint(&t, b.pos)))
+    q.iter(w).find(|(p, _)| p.id == local).map_or((0, None), |(p, b)| (p.found, near_checkpoint(&t, b.pos)))
 }
 
 fn local_player(w: &mut World) -> Option<Player> {
+    let local = w.resource::<crate::net::LocalId>().0;
     let mut q = w.query::<&Player>();
-    q.iter(w).min_by_key(|p| p.id).cloned()
+    q.iter(w).find(|p| p.id == local).cloned()
 }
 
 fn handle(w: &mut World, intent: Intent) {
@@ -1266,14 +1344,16 @@ fn handle(w: &mut World, intent: Intent) {
         (m.open, m.page, m.selected)
     };
     if !open {
-        if matches!(intent, Intent::Pause) {
-            open_page(w, Page::Pause);
+        match intent {
+            Intent::Pause => open_page(w, Page::Pause),
+            Intent::CancelSearch => crate::net::leave(w, None),
+            _ => {}
         }
         return;
     }
     let list = entries(page, &ctx);
     match intent {
-        Intent::Pause => {}
+        Intent::Pause | Intent::CancelSearch => {}
         Intent::Back => {
             if !w.resource_mut::<MenuState>().back() && !w.resource::<MenuState>().on_title() {
                 close(w);
@@ -1366,6 +1446,8 @@ fn change_entry(w: &mut World, e: Entry, d: i32) {
 fn confirm(w: &mut World, e: Entry) {
     match e {
         Entry::Act(a) => act(w, a),
+        // Enter after typing the password: off it goes.
+        Entry::Password => act(w, Act::Search),
         // Weapons are only shown: they're switched in game.
         Entry::Weapon(_) => {}
         // Confirming an option advances it by one step (wrapping for binary choices).
@@ -1401,23 +1483,20 @@ fn confirm(w: &mut World, e: Entry) {
             } else {
                 SimCommand::Equip { player: p.id, slot, item }
             };
-            w.resource_mut::<SimCommands>().0.push(cmd);
-            // The sim is paused during the menu: the command is applied right away.
-            let _ = w.run_system_cached(apply_commands);
+            // Solo: the sim is paused during the menu, the command is applied right away.
+            crate::net::send_command(w, cmd);
             w.resource_mut::<MenuState>().back();
         }
         // Travel: respawn rested in front of the other brazier (enemies back at their post).
         Entry::Place(i) => {
             let Some(p) = local_player(w) else { return };
-            w.resource_mut::<SimCommands>().0.push(SimCommand::Travel { player: p.id, checkpoint: i });
-            let _ = w.run_system_cached(apply_commands);
+            crate::net::send_command(w, SimCommand::Travel { player: p.id, checkpoint: i });
             crate::save::save_now(w);
             close(w);
         }
         // The torch lights up again: the boss awaits beyond its fog.
         Entry::Boss(i) => {
-            w.resource_mut::<SimCommands>().0.push(SimCommand::ReviveBoss(i));
-            let _ = w.run_system_cached(apply_commands);
+            crate::net::send_command(w, SimCommand::ReviveBoss(i));
             crate::save::save_now(w);
             close(w);
         }
@@ -1454,8 +1533,30 @@ fn act(w: &mut World, a: Act) {
             w.resource_mut::<MenuState>().back();
         }
         Act::ToTitle => {
-            crate::save::save_now(w);
+            // Co-op: each one back in their own world first (the guest's is saved then).
+            if w.resource::<crate::net::Net>().coop() {
+                crate::net::leave(w, None);
+            } else {
+                crate::save::save_now(w);
+            }
             w.resource_mut::<NextState<AppState>>().set(AppState::Title);
+        }
+        Act::OnlineHost | Act::OnlineJoin => {
+            w.resource_mut::<MenuState>().push(Page::Online(a == Act::OnlineHost));
+        }
+        Act::Search => {
+            let (page, password) = {
+                let m = w.resource::<MenuState>();
+                (m.page, m.password.clone())
+            };
+            if let Page::Online(host) = page {
+                crate::net::search(w, host, &password);
+                close(w);
+            }
+        }
+        Act::LeaveCoop => {
+            crate::net::leave(w, None);
+            close(w);
         }
         Act::Quit => {
             // The save is written at the end of the frame (see `save`).
@@ -1507,7 +1608,7 @@ fn entry_value(e: Entry, c: &PageCtx, s: &Settings, m: Option<&Monitor>, player:
         Entry::Weapon(i) if player.is_some_and(|p| p.weapon == i) => (tr("In hand", "En main").into(), true),
         Entry::Weapon(_) => (String::new(), true),
         Entry::Stat(st) => (player.map_or(String::new(), |p| st.value(p, t)), true),
-        Entry::Line(..) | Entry::Lang(_) | Entry::Style(_) | Entry::Act(_) => (String::new(), true),
+        Entry::Line(..) | Entry::Lang(_) | Entry::Style(_) | Entry::Act(_) | Entry::Password => (String::new(), true),
     }
 }
 
@@ -1527,6 +1628,7 @@ fn entry_label(e: Entry, t: &Tuning, device: Device) -> String {
         Entry::Style(h) if h == PS1_HEIGHT => "PS1".into(),
         Entry::Style(_) => tr("Modern", "Moderne").into(),
         Entry::Stat(st) => st.label().into(),
+        Entry::Password => tr("Password", "Mot de passe").into(),
     }
 }
 
@@ -1750,7 +1852,7 @@ fn build_rows(w: &mut World, list: Entity, entries: &[Entry], page: Page) {
 fn refresh_menu(
     mut commands: Commands,
     mut menu: ResMut<MenuState>,
-    (settings, save, device, tuning): (Res<Settings>, Res<SaveSlot>, Res<Device>, Res<Tuning>),
+    (settings, save, device, tuning, net): (Res<Settings>, Res<SaveSlot>, Res<Device>, Res<Tuning>, Res<crate::net::Net>),
     mut preview: ResMut<CheckpointPreview>,
     mut preview_node: Query<&mut Node, With<MenuPreview>>,
     monitors: Query<(&Monitor, Has<PrimaryMonitor>)>,
@@ -1807,6 +1909,7 @@ fn refresh_menu(
         here,
         owned,
         choosing: menu.choosing,
+        coop: net.coop(),
     };
     let list_entries = entries(menu.page, &ctx);
     // The help lines (icons) also depend on the language.
@@ -1831,7 +1934,11 @@ fn refresh_menu(
         set(&mut t, page_title(menu.page, *device));
     }
     for (mut t, mut n) in &mut texts.p1() {
-        let info = page_info(menu.page);
+        let info = match menu.page {
+            Page::Pause if net.coop() => tr("Co-op: the game goes on.", "Coop : la partie continue.").into(),
+            p => page_info(p).to_string(),
+        };
+        let info = info.as_str();
         set(&mut t, info);
         let want = if info.is_empty() { Display::None } else { Display::Flex };
         if n.display != want {
@@ -1899,7 +2006,11 @@ fn refresh_menu(
     }
     for (v, mut t, mut c) in &mut texts.p4() {
         let Some(e) = list_entries.get(v.0) else { continue };
-        let (s, enabled) = entry_value(*e, &ctx, &settings, m, player, save.data.as_ref(), &tuning);
+        let (s, enabled) = match e {
+            Entry::Password if menu.password.is_empty() => (tr("(none) — type it", "(aucun) — tapez-le").into(), true),
+            Entry::Password => (format!("{}_", menu.password), true),
+            _ => entry_value(*e, &ctx, &settings, m, player, save.data.as_ref(), &tuning),
+        };
         set(&mut t, &s);
         c.0 = if enabled { Color::srgb(0.95, 0.92, 0.85) } else { Color::srgba(0.6, 0.58, 0.55, 0.6) };
     }

@@ -28,7 +28,7 @@ pub struct Interp {
 }
 
 /// Animation clock: time step and progress between two simulation ticks. Frozen
-/// while the game is paused (menu open in game: the simulation stops running); the
+/// while the game is paused (menu open in solo: the simulation stops running); the
 /// particles keep going in real time.
 #[derive(Resource, Clone, Copy, Debug, Default)]
 pub struct AnimClock {
@@ -61,9 +61,10 @@ fn tick_anim_clock(
     fixed: Res<Time<Fixed>>,
     state: Res<State<AppState>>,
     menu: Res<crate::menu::MenuState>,
+    net: Res<crate::net::Net>,
     mut clock: ResMut<AnimClock>,
 ) {
-    let paused = *state.get() == AppState::Playing && menu.open;
+    let paused = *state.get() == AppState::Playing && menu.open && !net.coop();
     *clock = if paused {
         AnimClock { dt: 0.0, over: 1.0, paused }
     } else {

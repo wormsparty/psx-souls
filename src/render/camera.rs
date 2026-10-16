@@ -69,13 +69,18 @@ fn update_camera(
     look: Res<LookInput>,
     mut rig: ResMut<CameraRig>,
     players: Query<(&Player, &Interp), With<LocalPlayer>>,
+    others: Query<(&Player, &Interp, &crate::sim::fighter::Health), Without<LocalPlayer>>,
     foes: LockFoes,
     bones: PartBones,
     mut cam: Single<&mut Transform, With<WorldCamera>>,
     settings: Res<crate::settings::Settings>,
 ) {
     let dt = time.delta_secs();
-    let Ok((player, pi)) = players.single() else { return };
+    let Ok((me, mi)) = players.single() else { return };
+    // Co-op: fallen during a boss fight, they watch a teammate who fights on.
+    let waiting = me.state == crate::sim::player::PState::Dead && me.dead_ticks > crate::sim::encounter::RESPAWN_TICKS;
+    let watched = others.iter().find(|(p, _, h)| waiting && !h.dead() && p.zone == me.zone);
+    let (player, pi) = watched.map_or((me, mi), |(p, i, _)| (p, i));
     let lock = player
         .lock
         .and_then(|e| Some((lock_target(&tuning, e, player.lock_part, &foes, &bones)?, foes.get(e).ok()?.1)));

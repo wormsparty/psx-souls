@@ -9,7 +9,7 @@ use super::enemy::Enemy;
 use super::fighter::{Action, Body, Foe, Health, Hitstop, PrevBody};
 use super::player::{PState, Player, force_move};
 use super::world::{self, Mover, Step};
-use super::{DT, SimEvent, SimEvents, SimTick, math};
+use super::{DT, SimEvent, SimEvents, SimIds, SimTick, math, sim_order};
 
 /// Separates overlapping bodies and keeps them on walkable ground. A player pushed
 /// (or walking, rolling…) past an open edge falls.
@@ -19,28 +19,34 @@ pub fn separate_bodies(
     enc: Res<Encounter>,
     mut events: ResMut<SimEvents>,
     mut q: Query<(Entity, &mut Body, &PrevBody, &Health, Option<&mut Player>, &mut Action, Option<&Boss>)>,
+    ids: SimIds,
 ) {
     let solid = |h: &Health, p: Option<&Mut<Player>>| !h.dead() && !p.is_some_and(|p| p.falling);
-    let mut combos = q.iter_combinations_mut();
-    while let Some([(_, mut a, _, ha, pa, ..), (_, mut b, _, hb, pb, ..)]) = combos.fetch_next() {
-        if !solid(ha, pa.as_ref()) || !solid(hb, pb.as_ref()) {
-            continue;
-        }
-        let d = Vec3::new(b.pos.x - a.pos.x, 0.0, b.pos.z - a.pos.z);
-        let dist = math::flat_len(d);
-        let min = a.radius + b.radius;
-        if dist < min && (a.pos.y - b.pos.y).abs() < 1.5 {
-            let n = if dist > 1e-4 { d / dist } else { Vec3::X };
-            let overlap = min - dist;
-            let total = a.mass + b.mass;
-            let (wa, wb) = (b.mass / total, a.mass / total);
-            a.pos -= n * overlap * wa;
-            b.pos += n * overlap * wb;
+    let order: Vec<Entity> = sim_order(&ids).into_iter().filter(|e| q.contains(*e)).collect();
+    // Each pair once, always in the same order (the pushes add up).
+    for (i, &ea) in order.iter().enumerate() {
+        for &eb in &order[i + 1..] {
+            let Ok([(_, mut a, _, ha, pa, ..), (_, mut b, _, hb, pb, ..)]) = q.get_many_mut([ea, eb]) else { continue };
+            if !solid(ha, pa.as_ref()) || !solid(hb, pb.as_ref()) {
+                continue;
+            }
+            let d = Vec3::new(b.pos.x - a.pos.x, 0.0, b.pos.z - a.pos.z);
+            let dist = math::flat_len(d);
+            let min = a.radius + b.radius;
+            if dist < min && (a.pos.y - b.pos.y).abs() < 1.5 {
+                let n = if dist > 1e-4 { d / dist } else { Vec3::X };
+                let overlap = min - dist;
+                let total = a.mass + b.mass;
+                let (wa, wb) = (b.mass / total, a.mass / total);
+                a.pos -= n * overlap * wa;
+                b.pos += n * overlap * wb;
+            }
         }
     }
     let t = &*tuning;
     let obstacles = world::obstacles(t, CHECKPOINT_RADIUS);
-    for (entity, mut b, prev, hp, mut player, mut action, boss) in &mut q {
+    let mut it = q.iter_many_mut(&order);
+    while let Some((entity, mut b, prev, hp, mut player, mut action, boss)) = it.fetch_next() {
         if player.as_ref().is_some_and(|p| p.falling) {
             continue;
         }
@@ -232,20 +238,22 @@ pub fn resolve_hits(
         (Entity, Option<&mut Boss>, Option<&mut Enemy>, &Body, &mut Health, &mut Action, &mut Hitstop),
         (With<Foe>, Without<Player>),
     >,
+    ids: SimIds,
 ) {
     let t = &*tuning;
     let now = tick.0;
+    let order = sim_order(&ids);
     let mut pending = Vec::new();
     let targetable = |p: &Player, h: &Health| !h.dead() && !matches!(p.state, PState::Falling | PState::Dead);
 
     // 1) Detection (read-only), in a deterministic order: players then opponents.
-    for (pe, p, pbody, phealth, pact, _) in &players {
+    for (pe, p, pbody, phealth, pact, _) in players.iter_many(&order) {
         let (Some(mv), true) = (pact.mv, pact.executed) else { continue };
         if !targetable(p, phealth) {
             continue;
         }
         for (wi, h) in active_hits(t.get(mv), pact.tick) {
-            for (fe, fboss, _, fbody, fhealth, fact, _) in &foes {
+            for (fe, fboss, _, fbody, fhealth, fact, _) in foes.iter_many(&order) {
                 let parts = fboss.map_or(&[][..], |b| &b.def(t).parts[..]);
                 // Out of reach (the marionette hoisted into the air, the lamplighter slipping away).
                 if !fhealth.dead() && !fact.iframes(t) && !pact.hits.contains(&(wi, fe)) && hit_test(pbody, h, pact.tick, fbody, true, parts) {
@@ -254,13 +262,13 @@ pub fn resolve_hits(
             }
         }
     }
-    for (fe, _, _, fbody, fhealth, fact, _) in &foes {
+    for (fe, _, _, fbody, fhealth, fact, _) in foes.iter_many(&order) {
         let (Some(mv), true) = (fact.mv, fact.executed) else { continue };
         if fhealth.dead() || matches!(mv, MoveRef::Enemy(_, EnemyMove::Death)) {
             continue;
         }
         for (wi, h) in active_hits(t.get(mv), fact.tick) {
-            for (pe, p, pbody, phealth, _, _) in &players {
+            for (pe, p, pbody, phealth, _, _) in players.iter_many(&order) {
                 if targetable(p, phealth) && !fact.hits.contains(&(wi, pe)) && hit_test(fbody, h, fact.tick, pbody, false, &[]) {
                     pending.push(Pending { attacker: fe, victim: pe, mv, window: wi });
                 }
@@ -269,6 +277,7 @@ pub fn resolve_hits(
     }
 
     // 2) Resolution.
+    let mut slain = 0u64;
     for hit in pending {
         let h = &t.get(hit.mv).hits[hit.window as usize];
         if let Ok((pe, mut p, pbody, mut php, mut pact, mut pstop)) = players.get_mut(hit.attacker) {
@@ -313,7 +322,7 @@ pub fn resolve_hits(
                     fact.start(MoveRef::Enemy(e.kind, EnemyMove::Death), 0.0);
                     fact.executed = false;
                     if e.unique {
-                        p.slain |= 1u64 << e.spawn;
+                        slain |= 1u64 << e.spawn;
                     }
                     events.push(SimEvent::EnemyDied { pos: fbody.pos });
                 }
@@ -327,7 +336,7 @@ pub fn resolve_hits(
             };
             let pos = impact_point(fbody, pbody);
             let g = &t.player.guard;
-            match strike_player(t, now, fbody.pos, &Blow::of(h), &mut p, &mut pact, &mut php, &mut pstop, pbody, pos, &mut events) {
+            match strike_player(t, now, fbody.pos, &Blow::of(h), &mut p, &mut pact, &mut php, &mut pstop, pbody, pos, pe, &mut events) {
                 // I-frames don't consume the hit: it can land later in the window.
                 Struck::Dodged => continue,
                 Struck::Parried => {
@@ -341,6 +350,12 @@ pub fn resolve_hits(
                 Struck::Guarded | Struck::Hit => fstop.0 = h.hitstop,
             }
             fact.hits.push((hit.window, hit.victim));
+        }
+    }
+    // A unique enemy stays dead for the whole party (it's the host's world).
+    if slain != 0 {
+        for (_, mut p, ..) in &mut players {
+            p.slain |= slain;
         }
     }
 }
@@ -386,6 +401,7 @@ pub fn strike_player(
     pstop: &mut Hitstop,
     pbody: &Body,
     pos: Vec3,
+    victim: Entity,
     events: &mut SimEvents,
 ) -> Struck {
     if php.dead() || pact.iframes(t) {
@@ -418,7 +434,7 @@ pub fn strike_player(
             pstop.0 = blow.hitstop;
             if php.dead() {
                 force_move(p, pact, MoveRef::Player(PlayerMove::Death));
-                events.push(SimEvent::PlayerDied);
+                events.push(SimEvent::PlayerDied { entity: victim });
             } else if p.stamina <= 0.0 {
                 force_move(p, pact, MoveRef::Player(PlayerMove::GuardBreak));
                 events.push(SimEvent::GuardBreak { pos });
@@ -438,7 +454,7 @@ pub fn strike_player(
     events.push(SimEvent::Hit { pos, heavy: blow.reaction == Reaction::Heavy, foe: None });
     if php.dead() {
         force_move(p, pact, MoveRef::Player(PlayerMove::Death));
-        events.push(SimEvent::PlayerDied);
+        events.push(SimEvent::PlayerDied { entity: victim });
     } else if !pact.hyperarmor(t) {
         let mv = match blow.reaction {
             Reaction::Light => PlayerMove::HitLight,

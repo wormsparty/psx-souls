@@ -1,4 +1,5 @@
-//! Tuning tools: state overlay, hitboxes, slow motion, passive boss.
+//! Tuning tools: state overlay, hitboxes, slow motion, passive boss. In co-op, only those that
+//! don't touch the simulation (F1, F2): the peers would no longer simulate the same game.
 
 use bevy::prelude::*;
 
@@ -44,8 +45,10 @@ fn keys(
     mut sim: ResMut<SimDebug>,
     mut fixed: ResMut<Time<Fixed>>,
     mut reset: ResMut<crate::sim::ResetFight>,
+    net: Res<crate::net::Net>,
 ) {
-    if input.just_pressed(KeyCode::F5) {
+    let solo = !net.coop();
+    if input.just_pressed(KeyCode::F5) && solo {
         // Respawns the fighters while keeping the progress (the boss starts over).
         reset.requested = true;
     }
@@ -55,12 +58,12 @@ fn keys(
     if input.just_pressed(KeyCode::F2) {
         ui.hitboxes = !ui.hitboxes;
     }
-    if input.just_pressed(KeyCode::F3) {
+    if input.just_pressed(KeyCode::F3) && solo {
         ui.slow = !ui.slow;
         // Slow motion: the sim runs at 15 ticks/s, timings in ticks stay the same.
         fixed.set_timestep_hz(if ui.slow { TICK_HZ / 4.0 } else { TICK_HZ });
     }
-    if input.just_pressed(KeyCode::F4) {
+    if input.just_pressed(KeyCode::F4) && solo {
         sim.boss_passive = !sim.boss_passive;
     }
 }
@@ -223,13 +226,14 @@ impl Plugin for AutoShotPlugin {
         if std::env::var("SOULS_REST").is_ok() {
             app.add_systems(
                 FixedUpdate,
-                (|tick: Res<SimTick>, mut inputs: ResMut<crate::sim::input::PlayerInputs>| {
+                (|tick: Res<SimTick>, mut input: ResMut<crate::input::LocalInput>| {
                     if tick.0 == 60 {
-                        inputs.0[0].buttons |= crate::sim::input::btn::INTERACT;
+                        input.0.buttons |= crate::sim::input::btn::INTERACT;
                     }
                 })
                 .after(crate::input::collect_local_input)
-                .before(crate::sim::run_sim_tick)
+                .before(crate::input::feed_solo)
+                .before(crate::net::coop_tick)
                 .run_if(in_state(AppState::Playing)),
             );
         }
@@ -254,12 +258,25 @@ impl Plugin for AutoShotPlugin {
                 .run_if(in_state(AppState::Playing)),
             );
         }
+        // `SOULS_WANDER=1`: the local player moves, attacks, dodges and guards at random (co-op
+        // tests: every peer must keep simulating the same game).
+        if std::env::var("SOULS_WANDER").is_ok() {
+            app.add_systems(
+                FixedUpdate,
+                wander
+                    .after(crate::input::collect_local_input)
+                    .before(crate::input::feed_solo)
+                    .before(crate::net::coop_tick)
+                    .run_if(in_state(AppState::Playing)),
+            );
+        }
         if std::env::var("SOULS_AUTOPILOT").is_ok() {
             app.add_systems(
                 FixedUpdate,
                 autopilot
                     .after(crate::input::collect_local_input)
-                    .before(crate::sim::run_sim_tick)
+                    .before(crate::input::feed_solo)
+                    .before(crate::net::coop_tick)
                     .run_if(in_state(AppState::Playing)),
             );
         }
@@ -341,11 +358,36 @@ fn autoshot(
     }
 }
 
+fn wander(mut input: ResMut<crate::input::LocalInput>, mut t: Local<u32>, local: Res<crate::net::LocalId>, net: Res<crate::net::Net>) {
+    use crate::sim::input::{PlayerInput, btn};
+    // Looking for a partner: standing still, arms raised.
+    if net.searching() {
+        return;
+    }
+    *t += 1;
+    let i = *t;
+    let x = (i / 20).wrapping_mul(2654435761).wrapping_add(local.0 as u32 * 0x9E37_79B9) ^ 0x5bd1_e995;
+    let buttons = match (x >> 16) % 8 {
+        0 | 1 => btn::LIGHT,
+        2 => btn::DODGE,
+        3 => btn::GUARD,
+        4 => btn::LOCK,
+        _ => 0,
+    };
+    input.0 = PlayerInput {
+        buttons: if i % 20 < 8 { buttons } else { 0 },
+        move_x: ((x & 0xff) as i32 - 128).clamp(-127, 127) as i8,
+        move_y: (((x >> 8) & 0xff) as i32 - 128).clamp(-60, 127) as i8,
+        cam_yaw: input.0.cam_yaw,
+        cmd: [0; 4],
+    };
+}
+
 fn autopilot(
     tick: Res<SimTick>,
-    mut inputs: ResMut<crate::sim::input::PlayerInputs>,
+    mut input: ResMut<crate::input::LocalInput>,
     rig: Res<crate::render::camera::CameraRig>,
-    players: Query<(&Player, &Body)>,
+    players: Query<(&Player, &Body), With<LocalPlayer>>,
     bosses: Query<&Body, With<Boss>>,
 ) {
     use crate::sim::input::{PlayerInput, btn};
@@ -372,5 +414,5 @@ fn autopilot(
         i.buttons |= btn::GUARD;
     }
     let _ = p;
-    inputs.0[0] = i;
+    input.0 = i;
 }

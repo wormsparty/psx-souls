@@ -40,11 +40,17 @@ pub struct LookInput {
     pub recenter: bool,
 }
 
+/// This machine's input for the upcoming tick: the solo player's, or sent to the others in
+/// co-op (`net`).
+#[derive(Resource, Clone, Copy, Debug, Default)]
+pub struct LocalInput(pub PlayerInput);
+
 pub struct InputPlugin;
 
 impl Plugin for InputPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<InputLatch>()
+            .init_resource::<LocalInput>()
             .init_resource::<Device>()
             .init_resource::<LookInput>()
             .add_systems(
@@ -276,16 +282,30 @@ fn latch_presses(
     }
 }
 
-/// Builds the local player's input for the upcoming simulation tick.
+/// Solo: the local input is the first player's.
+pub fn feed_solo(local: Res<LocalInput>, mut inputs: ResMut<PlayerInputs>) {
+    inputs.0[0] = local.0;
+}
+
+/// Builds the local player's input for the upcoming simulation tick. Menu open (co-op, where
+/// the game goes on) or looking for a co-op partner: they stand still.
+#[allow(clippy::too_many_arguments)]
 pub fn collect_local_input(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
     gamepads: Query<&Gamepad>,
     rig: Res<CameraRig>,
+    menu: Res<MenuState>,
+    net: Res<crate::net::Net>,
     mut latch: ResMut<InputLatch>,
-    mut inputs: ResMut<PlayerInputs>,
+    mut local: ResMut<LocalInput>,
     cursor: Single<&CursorOptions, With<PrimaryWindow>>,
 ) {
+    if menu.open || net.searching() {
+        latch.pressed = 0;
+        local.0 = PlayerInput { cam_yaw: PlayerInput::quantize_yaw(rig.yaw), ..default() };
+        return;
+    }
     let grabbed = cursor.grab_mode != CursorGrabMode::None;
     let mut held = keyboard_buttons(&keys, grabbed.then_some(&*mouse), false);
     for g in &gamepads {
@@ -315,11 +335,12 @@ pub fn collect_local_input(
             stick = s.clamp_length_max(1.0);
         }
     }
-    inputs.0[0] = PlayerInput {
+    local.0 = PlayerInput {
         buttons,
         move_x: PlayerInput::quantize_axis(stick.x),
         move_y: PlayerInput::quantize_axis(stick.y),
         cam_yaw: PlayerInput::quantize_yaw(rig.yaw),
+        cmd: [0; 4],
     };
 }
 

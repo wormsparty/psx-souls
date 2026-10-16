@@ -14,11 +14,12 @@ use bevy::prelude::*;
 use super::boss::Boss;
 use super::data::{EnemyDef, EnemyMove, MoveRef, Tuning};
 use super::encounter::Encounter;
-use super::fighter::{Action, Body, Foe, Health, Hitstop, PrevBody, Team};
+use super::fighter::{Action, Body, Foe, Health, Hitstop, PrevBody, Team, party_hp};
 use super::items::{Item, Loot};
 use super::player::{PState, Player, run_frame};
 use super::rng::SimRng;
-use super::{DT, SimDebug, SimEntity, SimEvent, SimEvents, SimTick, math, world};
+use super::world::Zone;
+use super::{DT, SimDebug, SimEntity, SimEvent, SimEvents, SimIds, SimTick, math, sim_order, world};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum EState {
@@ -104,8 +105,8 @@ impl Enemy {
 }
 
 /// Creates all the level's enemies (except unique ones already defeated: bits of `slain`), in
-/// file order (determinism).
-pub fn spawn_all(commands: &mut Commands, t: &Tuning, slain: u64) {
+/// file order (determinism), sturdier for a party of `players` (`party_hp`).
+pub fn spawn_all(commands: &mut Commands, t: &Tuning, slain: u64, players: usize) {
     for (i, s) in t.level.enemies.iter().enumerate() {
         if s.unique && slain & (1u64 << i) != 0 {
             continue;
@@ -122,7 +123,7 @@ pub fn spawn_all(commands: &mut Commands, t: &Tuning, slain: u64) {
             Foe,
             Body { pos, yaw, radius: d.radius, height: d.height, mass: d.mass },
             PrevBody { pos, yaw },
-            Health::new(d.max_hp),
+            Health::new(d.max_hp * party_hp(players, false)),
             Hitstop::default(),
             Action::default(),
             Enemy {
@@ -152,8 +153,9 @@ pub fn spawn_all(commands: &mut Commands, t: &Tuning, slain: u64) {
 
 type PlayerView<'a> = (Entity, &'a Body, &'a Health, &'a Player);
 
+/// A player they can go after: alive, on their feet, in the level (not in a boss's arena).
 fn hunts(p: &PlayerView) -> bool {
-    !p.2.dead() && !matches!(p.3.state, PState::Dead | PState::Falling)
+    !p.2.dead() && !matches!(p.3.state, PState::Dead | PState::Falling) && p.3.zone == Zone::Level
 }
 
 /// The nearest player this enemy spots from its post.
@@ -192,12 +194,15 @@ pub fn enemy_act(
         (Without<Player>, Without<Boss>),
     >,
     players: Query<PlayerView, Without<Enemy>>,
+    ids: SimIds,
 ) {
     let t = &*tuning;
     let now = tick.0;
+    let order = sim_order(&ids);
     let mut groups: Vec<u8> = Vec::new();
 
-    for (entity, mut e, mut body, mut action, mut hitstop, mut health) in &mut enemies {
+    let mut it = enemies.iter_many_mut(&order);
+    while let Some((entity, mut e, mut body, mut action, mut hitstop, mut health)) = it.fetch_next() {
         e.alerted = false;
         if hitstop.0 > 0 {
             hitstop.0 -= 1;
@@ -271,7 +276,7 @@ pub fn enemy_act(
 
         match e.state {
             EState::Asleep | EState::Watch => {
-                if let Some(p) = spot(&e, &body, d.sight, players.iter()) {
+                if let Some(p) = spot(&e, &body, d.sight, players.iter_many(&order)) {
                     wake(&mut e, &mut action, p, &mut events, entity);
                     groups.push(e.group);
                 } else {
@@ -295,7 +300,7 @@ pub fn enemy_act(
                 // Target: the previous one if it's still there, otherwise the nearest player.
                 let tp = target_pos.or_else(|| {
                     let p = players
-                        .iter()
+                        .iter_many(&order)
                         .filter(hunts)
                         .min_by(|a, b| a.1.pos.distance(body.pos).total_cmp(&b.1.pos.distance(body.pos)))?;
                     e.target = Some(p.0);
@@ -373,19 +378,20 @@ pub fn enemy_act(
     }
 
     // Alert: the rest of the group wakes up (those hit this tick also raise the alarm).
-    for (_, e, ..) in &enemies {
+    for (_, e, ..) in enemies.iter_many(&order) {
         if e.alerted && e.group > 0 && !groups.contains(&e.group) {
             groups.push(e.group);
         }
     }
     let mut hunted = false;
-    for (entity, mut e, body, mut action, _, health) in &mut enemies {
+    let mut it = enemies.iter_many_mut(&order);
+    while let Some((entity, mut e, body, mut action, _, health)) = it.fetch_next() {
         if health.dead() {
             continue;
         }
         if e.group > 0 && groups.contains(&e.group) && matches!(e.state, EState::Asleep | EState::Watch) {
             let target = players
-                .iter()
+                .iter_many(&order)
                 .filter(hunts)
                 .min_by(|a, b| a.1.pos.distance(body.pos).total_cmp(&b.1.pos.distance(body.pos)))
                 .map(|p| p.0);
@@ -447,5 +453,5 @@ pub fn respawn_on_request(
         commands.entity(e).despawn();
     }
     let slain = players.iter().min_by_key(|p| p.id).map_or(0, |p| p.slain);
-    spawn_all(&mut commands, &tuning, slain);
+    spawn_all(&mut commands, &tuning, slain, players.iter().count());
 }

@@ -1,9 +1,12 @@
 //! Deterministic combat simulation at 60 ticks/s.
 //!
-//! Rules to stay compatible with future network rollback:
+//! Rules to stay compatible with network rollback (`snapshot`, `crate::net`):
 //! - no reading of `Time` or hardware input here: only `PlayerInputs` and `SimTick`;
 //! - maths via `math` (libm), randomness via `SimRng`;
-//! - all state lives in `Clone` components/resources.
+//! - all state lives in `Clone` components/resources (saved and restored by `snapshot`);
+//! - entities are visited in `SimId` order (`sim_order`), never in Bevy's storage order, which
+//!   differs from one machine to the other; an `Entity` is only a reference, never a value
+//!   (its bits differ between peers).
 
 pub mod boss;
 pub mod combat;
@@ -16,10 +19,13 @@ pub mod items;
 pub mod math;
 pub mod player;
 pub mod rng;
+pub mod snapshot;
 pub mod spell;
 pub mod world;
 
+use bevy::ecs::lifecycle::HookContext;
 use bevy::ecs::schedule::ScheduleLabel;
+use bevy::ecs::world::DeferredWorld;
 use bevy::prelude::*;
 
 use data::Tuning;
@@ -75,7 +81,10 @@ pub enum SimEvent {
     Fatal { pos: Vec3 },
     BossPhase2,
     BossDied,
-    PlayerDied,
+    PlayerDied { entity: Entity },
+    /// Co-op: a fallen player gets back up — at their checkpoint, or in the arena once the boss
+    /// is defeated (the others fought on).
+    Revived { entity: Entity },
     WeaponSwitched { entity: Entity },
     Heal { entity: Entity },
     /// Action refused for lack of stamina (visual feedback on the bar).
@@ -110,7 +119,7 @@ pub enum SimEvent {
     /// Consumable used (other than the flask, which gives `Heal`).
     ItemUsed { entity: Entity, item: items::Item },
     /// Checkpoint discovered (first rest).
-    Kindled { checkpoint: u8 },
+    Kindled { entity: Entity, checkpoint: u8 },
     /// The player went over the edge.
     Fell { entity: Entity },
     /// Jump, and back on the ground.
@@ -141,19 +150,70 @@ pub struct SimDebug {
 pub struct ResetFight {
     pub requested: bool,
     pub players: u8,
-    /// Starting progress. `None`: the current player's (or a new game).
+    /// Starting progress: the world (bosses, checkpoint, position) and the first player's
+    /// character. `None`: the current first player's (or a new game).
     pub progress: Option<Progress>,
+    /// Co-op: the characters of the other players (weapon, inventory, discoveries), by id from 1.
+    /// Empty: the current players' (missing ones get a copy of the first).
+    pub guests: Vec<Progress>,
 }
 
 impl Default for ResetFight {
     fn default() -> Self {
-        Self { requested: true, players: 1, progress: None }
+        Self { requested: true, players: 1, progress: None, guests: Vec::new() }
     }
 }
 
-/// Marker of all simulation entities (for the reset).
+/// Marker of all simulation entities (for the reset). Each one gets its `SimId` on creation.
 #[derive(Component, Clone, Copy, Debug)]
+#[require(SimId)]
 pub struct SimEntity;
+
+/// Stable identity of a simulation entity, in creation order: the same on every peer, unlike
+/// `Entity` (which also counts the presentation's entities). Assigned from `NextSimId` when the
+/// entity is created; a snapshot restore (`snapshot`) brings back its own.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[component(on_add = assign_sim_id)]
+pub struct SimId(pub u32);
+
+impl SimId {
+    const UNASSIGNED: SimId = SimId(u32::MAX);
+}
+
+impl Default for SimId {
+    fn default() -> Self {
+        Self::UNASSIGNED
+    }
+}
+
+/// Next `SimId` to hand out (part of the simulation state).
+#[derive(Resource, Clone, Copy, Debug, Default, Hash)]
+pub struct NextSimId(pub u32);
+
+fn assign_sim_id(mut world: DeferredWorld, ctx: HookContext) {
+    if world.get::<SimId>(ctx.entity).is_some_and(|id| *id != SimId::UNASSIGNED) {
+        return;
+    }
+    let id = {
+        let mut next = world.resource_mut::<NextSimId>();
+        next.0 = next.0.wrapping_add(1);
+        next.0 - 1
+    };
+    if let Some(mut s) = world.get_mut::<SimId>(ctx.entity) {
+        s.0 = id;
+    }
+}
+
+/// `SimId` of every simulation entity, to visit queries in a deterministic order.
+pub type SimIds<'w, 's> = Query<'w, 's, (Entity, &'static SimId)>;
+
+/// The simulation entities in `SimId` order. Queries are visited with `iter_many(&order)` (or
+/// `iter_many_mut`), which keeps this order and skips the entities they don't match.
+pub fn sim_order(ids: &SimIds) -> Vec<Entity> {
+    let mut v: Vec<(SimId, Entity)> = ids.iter().map(|(e, id)| (*id, e)).collect();
+    v.sort_unstable_by_key(|x| x.0);
+    v.into_iter().map(|(_, e)| e).collect()
+}
 
 pub struct SimPlugin;
 
@@ -168,6 +228,7 @@ impl Plugin for SimPlugin {
             .init_resource::<rng::SimRng>()
             .init_resource::<SimDebug>()
             .init_resource::<ResetFight>()
+            .init_resource::<NextSimId>()
             .init_resource::<Encounter>()
             .init_resource::<SimCommands>();
 
@@ -176,7 +237,7 @@ impl Plugin for SimPlugin {
             (SimSet::Begin, SimSet::Act, SimSet::Physics, SimSet::Combat, SimSet::End).chain(),
         );
         schedule.add_systems((
-            (reset_fight, encounter::apply_commands, begin_tick).chain().in_set(SimSet::Begin),
+            (reset_fight, encounter::input_commands, encounter::apply_commands, begin_tick).chain().in_set(SimSet::Begin),
             (player::player_act, boss::boss_act, enemy::enemy_act).chain().in_set(SimSet::Act),
             combat::separate_bodies.in_set(SimSet::Physics),
             (combat::resolve_hits, spell::spell_tick).chain().in_set(SimSet::Combat),
@@ -195,7 +256,7 @@ impl Plugin for SimPlugin {
     }
 }
 
-/// Runs one simulation tick. Call from `FixedUpdate` (or from rollback later).
+/// Runs one simulation tick. Call from `FixedUpdate` (solo) or from the rollback session (`net`).
 pub fn run_sim_tick(world: &mut World) {
     world.run_schedule(SimSchedule);
 }
@@ -210,31 +271,39 @@ fn reset_fight(
     mut enc: ResMut<Encounter>,
     mut events: ResMut<SimEvents>,
     mut rng: ResMut<rng::SimRng>,
+    mut next_id: ResMut<NextSimId>,
 ) {
     if !reset.requested {
         return;
     }
     reset.requested = false;
-    let progress = reset.progress.take().unwrap_or_else(|| {
-        players
-            .iter()
-            .min_by_key(|(p, ..)| p.id)
-            .map(|(p, b, h)| Progress::of_player(p, b, h, &enc, &tuning))
-            .unwrap_or_else(|| Progress::new_game(&tuning))
-    });
+    // The current characters, by id (the despawned entities' order doesn't matter: sorted).
+    let mut current: Vec<(u8, Progress)> = players.iter().map(|(p, b, h)| (p.id, Progress::of_player(p, b, h, &enc, &tuning))).collect();
+    current.sort_by_key(|c| c.0);
+    let progress = reset
+        .progress
+        .take()
+        .unwrap_or_else(|| current.first().map(|c| c.1.clone()).unwrap_or_else(|| Progress::new_game(&tuning)));
+    let guests = match std::mem::take(&mut reset.guests) {
+        g if g.is_empty() => current.into_iter().skip(1).map(|c| c.1).collect(),
+        g => g,
+    };
     for e in &existing {
         commands.entity(e).despawn();
     }
     events.0.clear();
     *rng = rng::SimRng::default();
+    *next_id = NextSimId::default();
     *enc = Encounter { defeated: progress.defeated, ..default() };
-    spawn_fight(&mut commands, &tuning, reset.players, &progress);
+    spawn_fight(&mut commands, &tuning, reset.players, &progress, &guests);
     events.push(SimEvent::Respawned);
 }
 
 /// Creates the players, the boss (if it hasn't been defeated) and the path enemies. Entities
-/// are created in a fixed order (determinism).
-pub fn spawn_fight(commands: &mut Commands, t: &Tuning, players: u8, progress: &Progress) {
+/// are created in a fixed order (determinism). The world comes from `progress` (the first
+/// player's, the host in co-op); each player brings their own character (`guests` from the
+/// second, by default a copy of the first).
+pub fn spawn_fight(commands: &mut Commands, t: &Tuning, players: u8, progress: &Progress, guests: &[Progress]) {
     let checkpoint = (progress.checkpoint as usize).min(t.level.checkpoints.len() - 1);
     let door_open = encounter::door_open(t, progress.defeated);
     let arena = progress.arena.filter(|&i| (i as usize) < t.arenas.len());
@@ -261,20 +330,21 @@ pub fn spawn_fight(commands: &mut Commands, t: &Tuning, players: u8, progress: &
             world::Step::Ground(p) => p,
             _ => pos,
         };
+        let me = id.checked_sub(1).and_then(|g| guests.get(g as usize)).unwrap_or(progress);
         let mut p = player::Player::new(id, t);
-        p.weapon = progress.weapon.min(t.weapons.len().saturating_sub(1) as u8);
-        p.inventory = progress.inventory.clone();
+        p.weapon = me.weapon.min(t.weapons.len().saturating_sub(1) as u8);
+        p.inventory = me.inventory.clone();
         // An old save's selected item may no longer exist.
         if p.inventory.active_item().is_none() {
             p.inventory.cycle();
         }
         p.checkpoint = checkpoint as u8;
-        p.found = progress.found | (1 << checkpoint);
-        p.picked = progress.picked;
-        p.slain = progress.slain;
+        p.found = me.found | (1 << checkpoint);
+        p.picked = me.picked;
+        p.slain = me.slain | progress.slain;
         p.zone = zone;
         let mut hp = Health::new(t.player.max_hp);
-        if let Some(cur) = progress.hp {
+        if let Some(cur) = me.hp {
             hp.cur = cur.clamp(1.0, hp.max);
         }
         commands.spawn((
@@ -288,12 +358,12 @@ pub fn spawn_fight(commands: &mut Commands, t: &Tuning, players: u8, progress: &
             p,
         ));
     }
-    enemy::spawn_all(commands, t, progress.slain);
+    enemy::spawn_all(commands, t, progress.slain, players.max(1) as usize);
 }
 
 /// Bosses of encounter `i` (`Tuning::encounters`), in their arena (`Tuning::arenas`), asleep at
-/// their spawn point, facing the fog you come in through.
-pub fn spawn_boss(commands: &mut Commands, t: &Tuning, i: u8) {
+/// their spawn point, facing the fog you come in through; sturdier for a party of `players`.
+pub fn spawn_boss(commands: &mut Commands, t: &Tuning, i: u8, players: usize) {
     let i = (i as usize).min(t.encounters.len() - 1);
     let arena = &t.arenas[i];
     let [bx, bz] = arena.boss_spawn;
@@ -310,7 +380,7 @@ pub fn spawn_boss(commands: &mut Commands, t: &Tuning, i: u8) {
             Foe,
             Body { pos, yaw, radius: bd.radius, height: bd.height, mass: bd.mass },
             PrevBody { pos, yaw },
-            Health::new(bd.max_hp),
+            Health::new(bd.max_hp * fighter::party_hp(players, !bd.minor)),
             Hitstop::default(),
             Action::default(),
             boss::Boss::new(t, def, i as u8),
@@ -339,57 +409,90 @@ fn end_tick(mut tick: ResMut<SimTick>) {
     tick.0 = tick.0.wrapping_add(1);
 }
 
-/// Hash of the simulation state: used by the determinism test (and later for network
-/// desync detection).
+/// Hash of the simulation state: used by the determinism tests and, over the network, to
+/// detect desyncs. Visits the entities in `SimId` order and never hashes an `Entity` (both
+/// differ from one machine to the other); references are hashed as the `SimId` they point to.
 pub fn state_hash(world: &mut World) -> u64 {
     use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
+    let mut h = StableHasher::default();
     world.resource::<SimTick>().0.hash(&mut h);
     world.resource::<rng::SimRng>().hash(&mut h);
     world.resource::<Encounter>().hash(&mut h);
-    let mut q = world.query::<(&Body, &Health, &Action)>();
-    for (b, hp, a) in q.iter(world) {
-        for f in [b.pos.x, b.pos.y, b.pos.z, b.yaw, hp.cur] {
-            f.to_bits().hash(&mut h);
+    world.resource::<NextSimId>().hash(&mut h);
+    let mut ids: Vec<(SimId, Entity)> = world.query::<(Entity, &SimId)>().iter(world).map(|(e, id)| (*id, e)).collect();
+    ids.sort_unstable_by_key(|x| x.0);
+    let id_of = |w: &World, e: Option<Entity>| e.and_then(|e| w.get::<SimId>(e)).map(|id| id.0);
+    for &(id, e) in &ids {
+        id.hash(&mut h);
+        if let (Some(b), Some(hp), Some(a)) = (world.get::<Body>(e), world.get::<Health>(e), world.get::<Action>(e)) {
+            for f in [b.pos.x, b.pos.y, b.pos.z, b.yaw, hp.cur] {
+                f.to_bits().hash(&mut h);
+            }
+            a.mv.hash(&mut h);
+            a.tick.hash(&mut h);
         }
-        a.mv.hash(&mut h);
-        a.tick.hash(&mut h);
-    }
-    let mut qp = world.query::<&player::Player>();
-    for p in qp.iter(world) {
-        p.stamina.to_bits().hash(&mut h);
-        p.regain.to_bits().hash(&mut h);
-        p.special.to_bits().hash(&mut h);
-        p.inventory.hash(&mut h);
-        (p.picked, p.slain, p.found, p.checkpoint).hash(&mut h);
-        (p.ward_ticks, p.vigor_ticks).hash(&mut h);
-        (p.airborne, p.air_vy.to_bits(), p.zone).hash(&mut h);
-    }
-    let mut qb = world.query::<&boss::Boss>();
-    for b in qb.iter(world) {
-        b.stagger.to_bits().hash(&mut h);
-        b.phase.hash(&mut h);
-        b.below_target.hash(&mut h);
-        b.flight.map(|(a, b)| (a.to_bits(), b.to_bits())).hash(&mut h);
-    }
-    let mut qs = world.query::<&spell::Spell>();
-    for s in qs.iter(world) {
-        for f in [s.pos.x, s.pos.y, s.pos.z] {
-            f.to_bits().hash(&mut h);
+        if let Some(p) = world.get::<player::Player>(e) {
+            p.stamina.to_bits().hash(&mut h);
+            p.regain.to_bits().hash(&mut h);
+            p.special.to_bits().hash(&mut h);
+            p.inventory.hash(&mut h);
+            (p.picked, p.slain, p.found, p.checkpoint).hash(&mut h);
+            (p.ward_ticks, p.vigor_ticks).hash(&mut h);
+            (p.airborne, p.air_vy.to_bits(), p.zone).hash(&mut h);
+            id_of(world, p.lock).hash(&mut h);
         }
-        s.age.hash(&mut h);
-    }
-    let mut qe = world.query::<&enemy::Enemy>();
-    for e in qe.iter(world) {
-        (e.spawn, e.state, e.target, e.idle).hash(&mut h);
-        e.poise.to_bits().hash(&mut h);
-    }
-    let mut ql = world.query::<&items::Loot>();
-    for l in ql.iter(world) {
-        for f in [l.pos.x, l.pos.y, l.pos.z] {
-            f.to_bits().hash(&mut h);
+        if let Some(b) = world.get::<boss::Boss>(e) {
+            b.stagger.to_bits().hash(&mut h);
+            b.phase.hash(&mut h);
+            b.below_target.hash(&mut h);
+            b.flight.map(|(a, b)| (a.to_bits(), b.to_bits())).hash(&mut h);
+            id_of(world, b.target).hash(&mut h);
         }
-        l.item.hash(&mut h);
+        if let Some(s) = world.get::<spell::Spell>(e) {
+            for f in [s.pos.x, s.pos.y, s.pos.z] {
+                f.to_bits().hash(&mut h);
+            }
+            s.age.hash(&mut h);
+        }
+        if let Some(en) = world.get::<enemy::Enemy>(e) {
+            (en.spawn, en.state, en.idle).hash(&mut h);
+            id_of(world, en.target).hash(&mut h);
+            en.poise.to_bits().hash(&mut h);
+        }
+        if let Some(l) = world.get::<items::Loot>(e) {
+            for f in [l.pos.x, l.pos.y, l.pos.z] {
+                f.to_bits().hash(&mut h);
+            }
+            l.item.hash(&mut h);
+        }
     }
+    h.finish()
+}
+
+/// A hasher that gives the same result on every machine (native 64-bit and browser 32-bit):
+/// lengths and enum discriminants (`usize`, `isize`) are hashed on 8 bytes.
+#[derive(Default)]
+pub struct StableHasher(std::collections::hash_map::DefaultHasher);
+
+impl std::hash::Hasher for StableHasher {
+    fn finish(&self) -> u64 {
+        self.0.finish()
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        self.0.write(bytes);
+    }
+    fn write_usize(&mut self, n: usize) {
+        self.0.write_u64(n as u64);
+    }
+    fn write_isize(&mut self, n: isize) {
+        self.0.write_i64(n as i64);
+    }
+}
+
+/// Hash of a value, the same on every machine (see `StableHasher`).
+pub fn stable_hash<T: std::hash::Hash + ?Sized>(v: &T) -> u64 {
+    use std::hash::Hasher;
+    let mut h = StableHasher::default();
+    v.hash(&mut h);
     h.finish()
 }

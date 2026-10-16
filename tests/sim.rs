@@ -119,8 +119,8 @@ fn events(app: &mut App) -> Vec<SimEvent> {
     std::mem::take(&mut app.world_mut().resource_mut::<SimEvents>().0)
 }
 
-const GUARD: PlayerInput = PlayerInput { buttons: btn::GUARD, move_x: 0, move_y: 0, cam_yaw: 0 };
-const IDLE: PlayerInput = PlayerInput { buttons: 0, move_x: 0, move_y: 0, cam_yaw: 0 };
+const GUARD: PlayerInput = PlayerInput { buttons: btn::GUARD, move_x: 0, move_y: 0, cam_yaw: 0, cmd: [0; 4] };
+const IDLE: PlayerInput = PlayerInput { buttons: 0, move_x: 0, move_y: 0, cam_yaw: 0, cmd: [0; 4] };
 
 /// Presses guard `lead` ticks before the impact and returns (HP lost, perfect guard?).
 fn guard_with_lead(lead: u32) -> (f32, bool) {
@@ -299,7 +299,7 @@ fn hit_reaction_and_death() {
     let hit_start = boss_attack(&mut app, "ecrasement", 2.6);
     steps(&mut app, hit_start + 30 + t.player.death.total, IDLE);
     assert_eq!(app.world().get::<Player>(p).unwrap().state, PState::Dead);
-    assert!(events(&mut app).iter().any(|e| matches!(e, SimEvent::PlayerDied)) || hp(&mut app, p) == 0.0);
+    assert!(events(&mut app).iter().any(|e| matches!(e, SimEvent::PlayerDied { .. })) || hp(&mut app, p) == 0.0);
     let _ = PlayerMove::Death;
 }
 
@@ -323,6 +323,7 @@ fn scripted_input(i: u32) -> PlayerInput {
         move_x: ((x & 0xff) as i32 - 128).clamp(-127, 127) as i8,
         move_y: (((x >> 8) & 0xff) as i32 - 128).clamp(-127, 127) as i8,
         cam_yaw: PlayerInput::quantize_yaw(i as f32 * 0.002),
+        cmd: [0; 4],
     }
 }
 
@@ -1135,7 +1136,7 @@ fn kindling_a_lantern_sets_respawn_and_allows_travel() {
     steps(&mut app, 2, IDLE);
     step(&mut app, PlayerInput { buttons: btn::INTERACT, ..IDLE });
     let ev = events(&mut app);
-    assert!(ev.iter().any(|e| matches!(e, SimEvent::Kindled { checkpoint: 1 })));
+    assert!(ev.iter().any(|e| matches!(e, SimEvent::Kindled { checkpoint: 1, .. })));
     let pl = app.world().get::<Player>(p).unwrap();
     assert_eq!((pl.checkpoint, pl.found), (1, 0b11));
     // Travel to the first lantern.

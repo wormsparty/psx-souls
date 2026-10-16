@@ -302,6 +302,7 @@ fn attach_visuals(
     tuning: Res<Tuning>,
     gltfs: Res<Assets<Gltf>>,
     new: Query<(Entity, &Body, Option<&Player>, Option<&Boss>, Option<&Enemy>), (With<SimEntity>, Without<Interp>)>,
+    local: Res<crate::net::LocalId>,
 ) {
     for (e, body, player, boss, enemy) in &new {
         let (kind, handle, scale) = if let Some(b) = boss {
@@ -325,7 +326,7 @@ fn attach_visuals(
         if boss.is_some() || enemy.is_some() {
             ec.insert(TintFlash::default());
         }
-        if player.is_some_and(|p| p.id == 0) {
+        if player.is_some_and(|p| p.id == local.0) {
             ec.insert(LocalPlayer);
         }
         ec.with_child((
@@ -506,13 +507,14 @@ fn drive_player_anims(
     clock: Res<super::AnimClock>,
     tuning: Res<Tuning>,
     models: Res<Models>,
-    mut q: Query<(&Player, &Action, &Body, &PrevBody, &Hitstop, &mut AnimDriver)>,
+    mut q: Query<(&Player, &Action, &Body, &PrevBody, &Hitstop, &mut AnimDriver, Has<LocalPlayer>)>,
     mut players: Query<&mut AnimationPlayer>,
+    net: Res<crate::net::Net>,
 ) {
     let t = &*tuning;
     let anims = &models.player;
     let dt = clock.dt;
-    for (p, action, body, prev, hitstop, mut drv) in &mut q {
+    for (p, action, body, prev, hitstop, mut drv, local) in &mut q {
         let weapon = WEAPON_MODELS[p.weapon as usize % WEAPON_MODELS.len()];
         let over = if hitstop.0 > 0 { 0.0 } else { clock.over };
         let speed = math::flat_len(body.pos - prev.pos) * 60.0;
@@ -544,6 +546,8 @@ fn drive_player_anims(
                     (("guard").into(), loop_time(&mut drv, anims, "guard", dt, 1.0))
                 }
             }
+            // Looking for a co-op partner: arms raised to the sky.
+            PState::Free if local && net.searching() => ("summon".into(), loop_time(&mut drv, anims, "summon", dt, 1.0)),
             PState::Free if p.airborne => {
                 let frames = anims.markers.get("jump").map_or(1.0, |m| m.frames);
                 ("jump".into(), ((p.air_ticks as f32 + over) / 60.0).min(frames / 60.0))

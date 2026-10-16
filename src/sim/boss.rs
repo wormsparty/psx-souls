@@ -9,8 +9,8 @@ use super::encounter::Encounter;
 use super::fighter::{Action, Body, Health, Hitstop};
 use super::player::{Player, motion_speed, run_frame};
 use super::rng::SimRng;
-use super::world::{self, STEP_UP};
-use super::{DT, SimDebug, SimEvent, SimEvents, SimTick, math, spell};
+use super::world::{self, STEP_UP, Zone};
+use super::{DT, SimDebug, SimEvent, SimEvents, SimId, SimIds, SimTick, math, sim_order, spell};
 
 #[derive(Component, Clone, Debug)]
 pub struct Boss {
@@ -101,17 +101,20 @@ pub fn boss_act(
     mut rng: ResMut<SimRng>,
     mut events: ResMut<SimEvents>,
     mut bosses: Query<
-        (Entity, &mut Boss, &mut Body, &mut Action, &mut Hitstop, &Health),
+        (Entity, &mut Boss, &mut Body, &mut Action, &mut Hitstop, &Health, &SimId),
         Without<Player>,
     >,
-    players: Query<(Entity, &Body, &Health), (With<Player>, Without<Boss>)>,
+    players: Query<(Entity, &Body, &Health, &Player), Without<Boss>>,
+    ids: SimIds,
 ) {
     let t = &*tuning;
     let now = tick.0;
+    let order = sim_order(&ids);
     // One of the leads has fallen: its partner enters phase 2.
-    let partner_fallen = bosses.iter().any(|(_, b, .., h)| h.dead() && !b.def(t).minor);
+    let partner_fallen = bosses.iter().any(|(_, b, _, _, _, h, _)| h.dead() && !b.def(t).minor);
 
-    for (entity, mut boss, mut body, mut action, mut hitstop, health) in &mut bosses {
+    let mut it = bosses.iter_many_mut(&order);
+    while let Some((entity, mut boss, mut body, mut action, mut hitstop, health, &sim_id)) = it.fetch_next() {
         let def = boss.def;
         let bd = &t.bosses[def as usize];
         if hitstop.0 > 0 {
@@ -120,20 +123,22 @@ pub fn boss_act(
         }
         action.executed = true;
 
-        // Target choice: recent last attacker, otherwise the nearest living player.
-        let alive = |e: Entity| players.get(e).is_ok_and(|(_, _, h)| !h.dead());
+        // Target choice: recent last attacker, otherwise the nearest living player (among those
+        // in its arena).
+        let here = Zone::Arena(boss.arena);
+        let alive = |e: Entity| players.get(e).is_ok_and(|(_, _, h, p)| !h.dead() && p.zone == here);
         let recent = boss
             .last_attacker
             .filter(|&(e, at)| now.saturating_sub(at) <= bd.aggro_ticks && alive(e))
             .map(|(e, _)| e);
         boss.target = recent.or_else(|| {
             players
-                .iter()
-                .filter(|(_, _, h)| !h.dead())
+                .iter_many(&order)
+                .filter(|(_, _, h, p)| !h.dead() && p.zone == here)
                 .min_by(|a, b| a.1.pos.distance(body.pos).total_cmp(&b.1.pos.distance(body.pos)))
                 .map(|(e, ..)| e)
         });
-        let target_pos = boss.target.and_then(|e| players.get(e).ok()).map(|(_, b, _)| b.pos);
+        let target_pos = boss.target.and_then(|e| players.get(e).ok()).map(|(_, b, ..)| b.pos);
         // Height of the target relative to the boss: a step above, it's out of reach.
         let rise = target_pos.map_or(0.0, |tp| tp.y - body.pos.y);
         boss.below_target = if rise > STEP_UP { boss.below_target + 1 } else { 0 };
@@ -162,7 +167,7 @@ pub fn boss_act(
                     events.push(SimEvent::Shockwave { pos: Vec3::new(a.x, body.pos.y, a.z), radius: r, boss: boss.def });
                 }
                 // The same attack only hits once, whatever its number of spells.
-                let volley = (entity.to_bits() as u32).rotate_left(16) ^ action.seq;
+                let volley = sim_id.0.rotate_left(16) ^ action.seq;
                 for c in def.casts.iter().filter(|c| c.at == action.tick) {
                     let aim = boss.target.zip(target_pos);
                     spell::cast(&mut commands, t, boss.def, (entity, action.seq), c, &body, aim, volley, &mut rng, &mut events);

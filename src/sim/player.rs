@@ -9,7 +9,7 @@ use super::fighter::{Action, Body, Foe, Health, Hitstop};
 use super::input::{InputBuffer, PlayerInputs, btn};
 use super::items::{self, Inventory, Item, Loot};
 use super::world::Zone;
-use super::{DT, SimEvent, SimEvents, SimTick, math};
+use super::{DT, SimEvent, SimEvents, SimIds, SimTick, math, sim_order};
 
 /// Gravity during a fall (m/s²).
 pub const GRAVITY: f32 = 22.0;
@@ -99,6 +99,8 @@ pub struct Player {
     pub air_ticks: u32,
     /// Where they are: the level or a boss arena (they went through its fog).
     pub zone: Zone,
+    /// Number of the last menu decision applied (`PlayerInput::cmd`).
+    pub cmd_seq: u8,
 }
 
 impl Player {
@@ -149,6 +151,7 @@ impl Player {
             air_from: 0.0,
             air_ticks: 0,
             zone: Zone::Level,
+            cmd_seq: 0,
         }
     }
 
@@ -232,18 +235,19 @@ fn foe_dist(b: &Body, pos: Vec3) -> f32 {
     (b.pos.distance(pos) - b.radius).max(0.0)
 }
 
-/// Nearest living opponent in range (and at roughly the same height).
-fn nearest_foe(foes: &Foes, pos: Vec3, range: f32) -> Option<Entity> {
-    foes.iter()
+/// Nearest living opponent in range (and at roughly the same height). `order`: the entities
+/// in `SimId` order (ties go to the oldest).
+fn nearest_foe(foes: &Foes, order: &[Entity], pos: Vec3, range: f32) -> Option<Entity> {
+    foes.iter_many(order)
         .filter(|(_, b, _, h, _)| !h.dead() && foe_dist(b, pos) <= range && (b.pos.y - pos.y).abs() < 4.0)
         .min_by(|a, b| foe_dist(a.1, pos).total_cmp(&foe_dist(b.1, pos)))
         .map(|(e, ..)| e)
 }
 
 /// Lockable points in range: (opponent, point, position).
-fn lock_candidates(t: &Tuning, foes: &Foes, pos: Vec3, range: f32) -> Vec<(Entity, u8, Vec3)> {
+fn lock_candidates(t: &Tuning, foes: &Foes, order: &[Entity], pos: Vec3, range: f32) -> Vec<(Entity, u8, Vec3)> {
     let mut out = Vec::new();
-    for (e, b, _, h, boss) in foes.iter() {
+    for (e, b, _, h, boss) in foes.iter_many(order) {
         if h.dead() || foe_dist(b, pos) > range || (b.pos.y - pos.y).abs() > 4.0 {
             continue;
         }
@@ -255,21 +259,22 @@ fn lock_candidates(t: &Tuning, foes: &Foes, pos: Vec3, range: f32) -> Vec<(Entit
 }
 
 /// Lock-on: the point closest to the camera axis (failing that, the nearest).
-fn pick_lock(t: &Tuning, foes: &Foes, pos: Vec3, cam_yaw: f32, range: f32) -> Option<(Entity, u8)> {
+fn pick_lock(t: &Tuning, foes: &Foes, order: &[Entity], pos: Vec3, cam_yaw: f32, range: f32) -> Option<(Entity, u8)> {
     let score = |p: Vec3| {
         let ang = math::wrap(math::yaw_of(p - pos) - cam_yaw).abs();
         ang * 6.0 + math::flat_len(p - pos) * 0.15
     };
-    lock_candidates(t, foes, pos, range)
+    lock_candidates(t, foes, order, pos, range)
         .into_iter()
         .min_by(|a, b| score(a.2).total_cmp(&score(b.2)))
         .map(|(e, i, _)| (e, i))
 }
 
 /// Target switch: the next lockable point to the left (`dir` > 0) or right.
-fn switch_lock(t: &Tuning, foes: &Foes, pos: Vec3, cur: (Entity, u8), cur_pos: Vec3, dir: f32, range: f32) -> Option<(Entity, u8)> {
+#[allow(clippy::too_many_arguments)]
+fn switch_lock(t: &Tuning, foes: &Foes, order: &[Entity], pos: Vec3, cur: (Entity, u8), cur_pos: Vec3, dir: f32, range: f32) -> Option<(Entity, u8)> {
     let base = math::yaw_of(cur_pos - pos);
-    lock_candidates(t, foes, pos, range)
+    lock_candidates(t, foes, order, pos, range)
         .into_iter()
         .filter(|(e, i, _)| (*e, *i) != cur)
         .map(|(e, i, p)| (e, i, math::wrap(math::yaw_of(p - pos) - base) * dir))
@@ -280,9 +285,10 @@ fn switch_lock(t: &Tuning, foes: &Foes, pos: Vec3, cur: (Entity, u8), cur_pos: V
 
 /// Target switch upwards (`dir` > 0) or downwards: the nearest higher (or lower) point,
 /// preferably in the same direction.
-fn switch_lock_vertical(t: &Tuning, foes: &Foes, pos: Vec3, cur: (Entity, u8), cur_pos: Vec3, dir: f32, range: f32) -> Option<(Entity, u8)> {
+#[allow(clippy::too_many_arguments)]
+fn switch_lock_vertical(t: &Tuning, foes: &Foes, order: &[Entity], pos: Vec3, cur: (Entity, u8), cur_pos: Vec3, dir: f32, range: f32) -> Option<(Entity, u8)> {
     let base = math::yaw_of(cur_pos - pos);
-    lock_candidates(t, foes, pos, range)
+    lock_candidates(t, foes, order, pos, range)
         .into_iter()
         .filter(|(e, i, _)| (*e, *i) != cur)
         .map(|(e, i, p)| (e, i, (p.y - cur_pos.y) * dir, math::wrap(math::yaw_of(p - pos) - base).abs()))
@@ -315,15 +321,17 @@ pub fn player_act(
     >,
     mut foes: Foes,
     loot: Query<(Entity, &Loot)>,
+    ids: SimIds,
 ) {
     let t = &*tuning;
     let now = tick.0;
     let pd = &t.player;
+    let order = sim_order(&ids);
     // In creation order (determinism, if two players reach for the same item).
-    let mut loot: Vec<(Entity, Loot)> = loot.iter().map(|(e, l)| (e, *l)).collect();
-    loot.sort_by_key(|(e, _)| *e);
+    let mut loot: Vec<(Entity, Loot)> = loot.iter_many(&order).map(|(e, l)| (e, *l)).collect();
 
-    for (entity, mut p, mut body, mut action, mut hitstop, mut health) in &mut players {
+    let mut it = players.iter_many_mut(&order);
+    while let Some((entity, mut p, mut body, mut action, mut hitstop, mut health)) = it.fetch_next() {
         let inp = inputs.0[p.id as usize % inputs.0.len()];
         let pressed = p.buffer.update(inp.buttons, now);
         p.guard_held = inp.held(btn::GUARD);
@@ -361,7 +369,7 @@ pub fn player_act(
         }
         let cam_yaw = inp.cam_yaw_rad();
         if pressed & btn::LOCK != 0 && !health.dead() && !p.falling {
-            let pick = if p.lock.is_some() { None } else { pick_lock(t, &foes, body.pos, cam_yaw, pd.lock_range) };
+            let pick = if p.lock.is_some() { None } else { pick_lock(t, &foes, &order, body.pos, cam_yaw, pd.lock_range) };
             p.lock = pick.map(|x| x.0);
             p.lock_part = pick.map_or(0, |x| x.1);
         }
@@ -374,10 +382,10 @@ pub fn player_act(
         {
             let next = if pressed & (btn::TARGET_UP | btn::TARGET_DOWN) != 0 {
                 let dir = if pressed & btn::TARGET_UP != 0 { 1.0 } else { -1.0 };
-                switch_lock_vertical(t, &foes, body.pos, (cur, p.lock_part), cur_pos, dir, pd.lock_range)
+                switch_lock_vertical(t, &foes, &order, body.pos, (cur, p.lock_part), cur_pos, dir, pd.lock_range)
             } else {
                 let dir = if pressed & btn::TARGET_LEFT != 0 { 1.0 } else { -1.0 };
-                switch_lock(t, &foes, body.pos, (cur, p.lock_part), cur_pos, dir, pd.lock_range)
+                switch_lock(t, &foes, &order, body.pos, (cur, p.lock_part), cur_pos, dir, pd.lock_range)
             };
             if let Some((e, i)) = next {
                 p.lock = Some(e);
@@ -387,7 +395,7 @@ pub fn player_act(
 
         let target = p
             .lock
-            .or_else(|| nearest_foe(&foes, body.pos, AUTO_TARGET_RANGE))
+            .or_else(|| nearest_foe(&foes, &order, body.pos, AUTO_TARGET_RANGE))
             .and_then(|e| foes.get(e).ok())
             .map(|(e, b, a, _, boss)| TargetInfo {
                 entity: e,
@@ -418,7 +426,7 @@ pub fn player_act(
             if p.state == PState::Falling && p.fall_ticks >= FALL_DEATH_TICKS {
                 health.cur = 0.0;
                 p.state = PState::Dead;
-                events.push(SimEvent::PlayerDied);
+                events.push(SimEvent::PlayerDied { entity });
             }
             continue;
         }
@@ -805,7 +813,7 @@ fn try_interact(p: &mut Player, body: &mut Body, health: &mut Health, enc: &mut 
     p.buffer.consume(btn::INTERACT);
     if p.found & (1u32 << cp) == 0 {
         p.found |= 1u32 << cp;
-        ctx.events.push(SimEvent::Kindled { checkpoint: cp });
+        ctx.events.push(SimEvent::Kindled { entity: ctx.entity, checkpoint: cp });
     }
     p.checkpoint = cp;
     enc.respawn_enemies = true;
