@@ -44,9 +44,10 @@ use crate::sim::{NextSimId, ResetFight, SimDebug, SimEvents, SimTick, rng::SimRn
 
 /// Protocol version: peers of different versions refuse each other.
 const VERSION: u32 = 1;
-/// Signaling server by default (`tools/lobby.sh`): `SOULS_LOBBY` (native) or `?lobby=` (web)
-/// to change it, `SOULS_ROOM` / `?room=` for the room.
-pub const DEFAULT_LOBBY: &str = "ws://127.0.0.1:3536";
+/// Signaling server by default: the public one of matchbox's author (no guarantee it stays up).
+/// `SOULS_LOBBY` (native) or `?lobby=` (web) to change it (`tools/lobby.sh` for one's own),
+/// `SOULS_ROOM` / `?room=` for the room.
+pub const DEFAULT_LOBBY: &str = "wss://match-0-13.helsing.studio";
 const DEFAULT_ROOM: &str = "psx-souls";
 /// Local inputs are delayed by this many ticks: fewer rollbacks, for 33 ms of latency.
 const INPUT_DELAY: usize = 2;
@@ -94,7 +95,7 @@ pub enum Phase {
 /// Why the co-op stopped, or didn't start (shown for a few seconds).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Notice {
-    /// Signaling server unreachable (or connection lost).
+    /// Signaling server unreachable (or connection lost): its address.
     Unreachable(String),
     /// The host already has a partner.
     Full,
@@ -152,6 +153,8 @@ pub struct Net {
     /// The guest's own world when the co-op started: they go back to it, with their character
     /// (`save`).
     pub guest_base: Option<Progress>,
+    /// The signaling server's address (for the notice when it can't be reached).
+    lobby: String,
     socket: Option<socket::Socket>,
     host: Option<PeerId>,
     /// Host: the guest who said hello.
@@ -193,9 +196,9 @@ pub fn coop_running(net: Res<Net>) -> bool {
     net.phase == Phase::Running
 }
 
-/// Address of the room: signaling server and room name (from the password: only those who
+/// Signaling server and room's address (the room's name from the password: only those who
 /// have the same one meet).
-fn room_url(password: &str) -> String {
+fn room_url(password: &str) -> (String, String) {
     #[cfg(not(target_arch = "wasm32"))]
     let (lobby, room) = (std::env::var("SOULS_LOBBY").ok(), std::env::var("SOULS_ROOM").ok());
     #[cfg(target_arch = "wasm32")]
@@ -210,16 +213,11 @@ fn room_url(password: &str) -> String {
                 _ => {}
             }
         }
-        // By default, the machine serving the page.
-        if lobby.is_none()
-            && let Some(host) = location.and_then(|l| l.hostname().ok()).filter(|h| !h.is_empty())
-        {
-            lobby = Some(format!("ws://{host}:3536"));
-        }
         (lobby, room)
     };
-    let lobby = lobby.unwrap_or_else(|| DEFAULT_LOBBY.into());
-    format!("{}/{}", lobby.trim_end_matches('/'), room_name(&room.unwrap_or_else(|| DEFAULT_ROOM.into()), password))
+    let lobby = lobby.unwrap_or_else(|| DEFAULT_LOBBY.into()).trim_end_matches('/').to_string();
+    let url = format!("{lobby}/{}", room_name(&room.unwrap_or_else(|| DEFAULT_ROOM.into()), password));
+    (lobby, url)
 }
 
 /// Room for a password (hashed: it doesn't travel in clear to the server).
@@ -249,10 +247,13 @@ fn own_character(w: &mut World) -> Progress {
 
 /// Starts looking for a partner (from a brazier): as the host (`host`), or to join one.
 pub fn search(w: &mut World, host: bool, password: &str) {
+    let (lobby, url) = room_url(password);
+    info!("co-op: signaling server {lobby}");
     *w.resource_mut::<Net>() = Net {
         role: if host { Role::Host } else { Role::Guest },
         phase: Phase::Connecting,
-        socket: Some(socket::Socket::open(&room_url(password))),
+        socket: Some(socket::Socket::open(&url)),
+        lobby,
         ..default()
     };
 }
@@ -300,10 +301,11 @@ pub fn send_command(w: &mut World, cmd: SimCommand) {
 pub fn search_text(net: &Net) -> String {
     use crate::lang::tr;
     let what = match (net.phase, net.role) {
-        (Phase::Connecting, _) => tr("Connecting to the lobby…", "Connexion au salon…"),
-        (Phase::Lobby, Role::Host) => tr("Waiting for a partner…", "En attente d'un partenaire…"),
+        (Phase::Connecting, _) => tr("Connecting to the matchmaking server…", "Connexion au serveur de mise en relation…"),
+        (Phase::Lobby, Role::Host) => tr("Waiting for another player…", "En attente d'un autre joueur…"),
+        (Phase::Lobby, _) if net.host.is_some() => tr("Host found, waiting for the start…", "Hôte trouvé, en attente du départ…"),
         (Phase::Lobby, _) => tr("Looking for a host…", "Recherche d'un hôte…"),
-        _ => tr("Joining…", "Connexion au partenaire…"),
+        _ => tr("Connecting to the other player…", "Connexion à l'autre joueur…"),
     };
     let left = (SEARCH_SECS - net.searching_for).max(0.0) as u32;
     format!("{what} {}:{:02}", left / 60, left % 60)
@@ -313,7 +315,9 @@ pub fn notice_text(n: Option<&Notice>) -> String {
     use crate::lang::tr;
     match n {
         None => String::new(),
-        Some(Notice::Unreachable(why)) => format!("{} ({why})", tr("Cannot reach the lobby server", "Serveur de salon injoignable")),
+        Some(Notice::Unreachable(server)) => {
+            format!("{} ({server})", tr("Matchmaking server unavailable, co-op impossible", "Serveur de mise en relation indisponible, coop impossible"))
+        }
         Some(Notice::Full) => tr("The host already has a partner.", "L'hôte a déjà un partenaire.").into(),
         Some(Notice::Version) => tr("The other player runs a different version of the game.", "L'autre joueur a une version différente du jeu.").into(),
         Some(Notice::HostLeft) => tr("The host has left: back to your world.", "L'hôte est parti : retour dans votre monde.").into(),
@@ -394,7 +398,8 @@ fn lobby(world: &mut World) {
         let Some(sock) = net.socket.as_mut() else { return };
         if let Some(why) = sock.failure() {
             if matches!(net.phase, Phase::Connecting | Phase::Lobby) {
-                end = Some(Notice::Unreachable(why));
+                warn!("co-op: signaling server {}: {why}", net.lobby);
+                end = Some(Notice::Unreachable(net.lobby.clone()));
             }
             return;
         }

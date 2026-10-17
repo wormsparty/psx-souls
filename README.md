@@ -65,12 +65,13 @@ defeated bosses, kindled braziers, where it stands), each one with **their own c
 own character.
 
 ```sh
-# 1. The lobby server (installs matchbox_server the first time), on ws://<machine>:3536
-tools/lobby.sh
-
-# 2. Each player, in game: rest at a brazier → Host online / Join online
+# Each player, in game: rest at a brazier → Host online / Join online
 cargo run --release
 ```
+
+By default the players meet through matchbox's public signaling server
+(`wss://match-0-13.helsing.studio`, run by its author, no guarantee it stays up): if it can't be
+reached, the game says so and stays solo. For your own, see below (`tools/lobby.sh`).
 
 - **Starting**: at a brazier, *Host online* or *Join online*, with an optional **password**
   (keyboard): only a player with the same one will find you; empty, anyone. While it searches,
@@ -94,10 +95,12 @@ cargo run --release
   trip below. *Connection unstable* means your partner has gone silent; *DESYNC* means the
   games no longer match (a bug: please report it with the logs).
 
-The lobby server only puts the players of a room in touch (keep it running during the game);
-the game itself then goes directly from one machine to the other. By default the game looks for
-it on `ws://127.0.0.1:3536`: elsewhere on the network, set `SOULS_LOBBY=ws://192.168.1.10:3536`.
-In the browser, the page's own machine is used, or `?lobby=ws://…` in the address. Native and
+The lobby server only puts the players of a room in touch; the game itself then goes directly
+from one machine to the other. Your own: `tools/lobby.sh` (installs matchbox_server the first
+time, on `ws://<machine>:3536`), then `SOULS_LOBBY=ws://192.168.1.10:3536` (native) or
+`?lobby=ws://…` in the address (browser). Only STUN is used (no TURN relay): behind some strict
+NATs (mobile networks, some company networks) the two machines can't reach each other, and the
+search goes on until it gives up. Native and
 browser players can play together. The password is hashed into the room's name.
 
 How it works: both machines simulate the whole game, only the inputs travel (10 bytes per
@@ -107,7 +110,7 @@ replays the ticks since (at most 8). Hits, guards and perfect guards are thus de
 way on both sides. The menus' decisions (equipment, travel, rekindling a torch) travel with the
 inputs too.
 
-Testing on one machine: `tools/lobby.sh`, then two windows, for example
+Testing on one machine: two windows, for example
 `SOULS_COOP=host cargo run --release` and `SOULS_COOP=join cargo run --release` (the search
 starts as soon as the game does; `SOULS_PASSWORD=…` for a password). They share the save and the
 settings: to keep them apart, give each one its own `XDG_CONFIG_HOME` (Linux).

@@ -742,7 +742,7 @@ fn setup(mut commands: Commands, tuning: Res<Tuning>, font: Res<UiFont>, mut ima
     commands
         .spawn((
             ChildOf(root),
-            Node { position_type: PositionType::Absolute, width: percent(100), bottom: percent(24), justify_content: JustifyContent::Center, ..default() },
+            Node { position_type: PositionType::Absolute, width: percent(100), bottom: px(100), justify_content: JustifyContent::Center, ..default() },
         ))
         .with_children(|c| {
             c.spawn((font.text("", 1, GOLD), SearchLine));
@@ -1066,8 +1066,8 @@ fn prompt(
     mut hints: Query<&mut Hint>,
 ) {
     // Picking up takes priority over resting (same button). (text, with the key?)
-    // Looking for a co-op partner: nothing to do but wait.
-    let label = players.single().ok().filter(|(p, _, h)| !h.dead() && !net.searching() && matches!(p.state, PState::Free | PState::Guard)).and_then(
+    // Looking for a co-op partner: nothing to do but wait (and a notice takes the spot).
+    let label = players.single().ok().filter(|(p, _, h)| !h.dead() && !net.searching() && net.notice_for <= 0.0 && matches!(p.state, PState::Free | PState::Guard)).and_then(
         |(p, b, _)| {
             if near_loot(loot.iter(), b.pos).is_some() || near_pickup(&tuning, p.picked, b.pos).is_some() {
                 return Some((tr("Pick up", "Ramasser"), true));
