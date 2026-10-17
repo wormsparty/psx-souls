@@ -304,9 +304,9 @@ pub fn search_text(net: &Net) -> String {
     use crate::lang::tr;
     let what = match (net.phase, net.role) {
         (Phase::Connecting, _) => tr("Connecting to the matchmaking server…", "Connexion au serveur de mise en relation…"),
-        (Phase::Lobby, Role::Host) => tr("Waiting for another player…", "En attente d'un autre joueur…"),
-        (Phase::Lobby, _) if net.host.is_some() => tr("Host found, waiting for the start…", "Hôte trouvé, en attente du départ…"),
-        (Phase::Lobby, _) => tr("Looking for a host…", "Recherche d'un hôte…"),
+        (Phase::Lobby, Role::Host) => tr("Your beacon burns, awaiting another player…", "Votre fanal brûle, en attente d'un autre joueur…"),
+        (Phase::Lobby, _) if net.host.is_some() => tr("Beacon found, waiting for the start…", "Fanal trouvé, en attente du départ…"),
+        (Phase::Lobby, _) => tr("Looking for a beacon…", "Recherche d'un fanal…"),
         _ => tr("Connecting to the other player…", "Connexion à l'autre joueur…"),
     };
     let left = (SEARCH_SECS - net.searching_for).max(0.0) as u32;

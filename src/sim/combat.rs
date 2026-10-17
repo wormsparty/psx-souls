@@ -352,7 +352,8 @@ pub fn resolve_hits(
             fact.hits.push((hit.window, hit.victim));
         }
     }
-    // A unique enemy stays dead for the whole party (it's the host's world).
+    // A unique enemy stays dead for the whole party (it's the host's world), and counts as
+    // defeated in everyone's own world.
     if slain != 0 {
         for (_, mut p, ..) in &mut players {
             p.slain |= slain;

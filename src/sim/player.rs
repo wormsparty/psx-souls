@@ -86,6 +86,10 @@ pub struct Player {
     /// Picked-up items, defeated unique enemies (bits, see `Progress`).
     pub picked: u64,
     pub slain: u64,
+    /// Bosses that count for this player's own progress (bits, see `Progress::defeated`): those
+    /// of their own world, plus the ones defeated while they were in the arena. The world's are
+    /// in `Encounter::defeated` (the host's, in co-op).
+    pub felled: u32,
     /// Fall in progress (the body keeps falling after death, until the respawn).
     pub falling: bool,
     pub fall_vy: f32,
@@ -142,6 +146,7 @@ impl Player {
             found: 1,
             picked: 0,
             slain: 0,
+            felled: 0,
             falling: false,
             fall_vy: 0.0,
             fall_ticks: 0,
@@ -786,7 +791,7 @@ fn try_interact(p: &mut Player, body: &mut Body, health: &mut Health, enc: &mut 
     if !p.buffer.buffered(btn::INTERACT, ctx.now, ctx.t.player.input_buffer) {
         return false;
     }
-    if let Some((e, l)) = near_loot(ctx.loot.iter().map(|(e, l)| (*e, l)), body.pos) {
+    if let Some((e, l)) = near_loot(ctx.loot.iter().map(|(e, l)| (*e, l)), p.id, body.pos) {
         p.buffer.consume(btn::INTERACT);
         ctx.loot.retain(|(le, _)| *le != e);
         ctx.commands.entity(e).despawn();

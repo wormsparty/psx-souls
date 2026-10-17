@@ -194,6 +194,68 @@ fn guests_bring_their_own_character() {
     assert!(b0.pos.distance(b1.pos) < 2.0);
 }
 
+/// A boss counts for the guest's own progress only if they were in its arena when it fell: not
+/// the ones the host had defeated before.
+#[test]
+fn a_boss_defeated_together_counts_for_the_guest() {
+    let t = Tuning::builtin();
+    let host = Progress { arena: Some(0), defeated: 0b100, ..Progress::new_game(&t) };
+    let guest = Progress { defeated: 0b1000, ..Progress::new_game(&t) };
+    let mut app = party(2, host);
+    app.world_mut().resource_mut::<ResetFight>().guests = vec![guest.clone()];
+    idle(&mut app, 3);
+    assert!(app.world().resource::<Encounter>().active);
+    let w = app.world_mut();
+    let bosses: Vec<Entity> = w.query_filtered::<Entity, With<Boss>>().iter(w).collect();
+    for b in bosses {
+        w.get_mut::<Health>(b).unwrap().cur = 0.0;
+    }
+    idle(&mut app, 2);
+    let enc = *app.world().resource::<Encounter>();
+    assert_eq!(enc.defeated, 0b101);
+    let (_, p1, b1, h1) = player(&mut app, 1);
+    let coop = Progress::of_player(&p1, &b1, &h1, &enc, &t);
+    assert_eq!(coop.defeated, 0b1001);
+    assert_eq!(psx_souls::save::guest_progress(&guest, &coop).defeated, 0b1001);
+    // The host's world is unchanged by the guest's.
+    let (_, p0, b0, h0) = player(&mut app, 0);
+    assert_eq!(Progress::of_player(&p0, &b0, &h0, &enc, &t).defeated, 0b101);
+}
+
+/// An enemy drops a loot for each player: only its owner can pick it up, the other's stays.
+#[test]
+fn each_player_gets_their_own_loot() {
+    use psx_souls::sim::data::LootDef;
+    use psx_souls::sim::items::{Item, Loot};
+    let t = Tuning::builtin();
+    let mut app = party(2, Progress::new_game(&t));
+    idle(&mut app, 1);
+    let w = app.world_mut();
+    let (foe, kind) = w.query::<(Entity, &Enemy)>().iter(w).map(|(e, en)| (e, en.kind)).next().unwrap();
+    w.resource_mut::<Tuning>().enemies[kind as usize].loot = vec![LootDef { item: Item::WardingAsh, chance: 1.0 }];
+    w.get_mut::<Health>(foe).unwrap().cur = 0.0;
+    idle(&mut app, t.enemies[kind as usize].death.total + psx_souls::sim::enemy::VANISH_TICKS + 5);
+    let w = app.world_mut();
+    let mut loot: Vec<Loot> = w.query::<&Loot>().iter(w).copied().collect();
+    loot.sort_by_key(|l| l.owner);
+    assert_eq!(loot.iter().map(|l| (l.item, l.owner)).collect::<Vec<_>>(), vec![(Item::WardingAsh, 0), (Item::WardingAsh, 1)]);
+
+    // The guest picks up theirs (the host's is right there too, but not for them).
+    let e1 = player(&mut app, 1).0;
+    app.world_mut().get_mut::<Body>(e1).unwrap().pos = loot[0].pos + Vec3::new(0.6, 0.0, 0.0);
+    idle(&mut app, 15);
+    let take = PlayerInput { buttons: btn::INTERACT, ..default() };
+    step(&mut app, &[PlayerInput::default(), take]);
+    idle(&mut app, 30);
+    step(&mut app, &[PlayerInput::default(), take]);
+    idle(&mut app, 2);
+    assert_eq!(player(&mut app, 1).1.inventory.count(Item::WardingAsh), 1);
+    assert_eq!(player(&mut app, 0).1.inventory.count(Item::WardingAsh), 0);
+    let w = app.world_mut();
+    let left: Vec<u8> = w.query::<&Loot>().iter(w).map(|l| l.owner).collect();
+    assert_eq!(left, vec![0]);
+}
+
 /// Fallen alone in the level: back at their checkpoint, the others and the world untouched.
 #[test]
 fn a_fallen_player_gets_back_up_alone_at_the_checkpoint() {

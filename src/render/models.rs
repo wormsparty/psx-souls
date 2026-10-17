@@ -872,13 +872,14 @@ fn spawn_pickups(
 }
 
 /// Loot dropped by an enemy: the glow is attached to the simulation entity (it goes away
-/// with it once picked up).
-fn loot_glows(mut commands: Commands, glow: Res<GlowAssets>, loot: Query<(Entity, &Loot), Without<GlowPulse>>) {
+/// with it once picked up). Co-op: only ours shows, the partner's is theirs alone.
+fn loot_glows(mut commands: Commands, glow: Res<GlowAssets>, local: Res<crate::net::LocalId>, loot: Query<(Entity, &Loot), Without<GlowPulse>>) {
     for (e, l) in &loot {
         let phase = (l.pos.x * 12.9898 + l.pos.z * 78.233).sin() * 3.0;
+        let vis = if l.owner == local.0 { Visibility::default() } else { Visibility::Hidden };
         commands
             .entity(e)
-            .insert((GlowPulse(phase), Transform::from_translation(l.pos + Vec3::Y * 0.3), Visibility::default()))
+            .insert((GlowPulse(phase), Transform::from_translation(l.pos + Vec3::Y * 0.3), vis))
             .with_children(|c| glow.spawn(c));
     }
 }

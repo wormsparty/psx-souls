@@ -104,7 +104,9 @@ impl Progress {
             Some([body.pos.x, body.pos.z, body.yaw])
         };
         Self {
-            defeated: enc.defeated,
+            // The first player's world is the one in play (the host's, in co-op); a guest
+            // only counts the bosses defeated with them.
+            defeated: if p.id == 0 { enc.defeated } else { p.felled },
             weapon: p.weapon,
             inventory,
             hp: (!dead).then_some(hp.cur),
@@ -164,9 +166,9 @@ pub fn pickup_pos(t: &Tuning, i: usize) -> Vec3 {
     Vec3::new(p.pos[0], world::floor_at(t, p.pos[0], p.pos[1], 0.0).unwrap_or(0.0), p.pos[1])
 }
 
-/// Loot on the ground within range (the closest).
-pub fn near_loot<'a>(loot: impl Iterator<Item = (Entity, &'a Loot)>, pos: Vec3) -> Option<(Entity, Loot)> {
-    loot.filter(|(_, l)| within(pos, l.pos, PICKUP_RANGE))
+/// Loot of player `owner` on the ground within range (the closest).
+pub fn near_loot<'a>(loot: impl Iterator<Item = (Entity, &'a Loot)>, owner: u8, pos: Vec3) -> Option<(Entity, Loot)> {
+    loot.filter(|(_, l)| l.owner == owner && within(pos, l.pos, PICKUP_RANGE))
         .min_by(|a, b| math::flat_len(pos - a.1.pos).total_cmp(&math::flat_len(pos - b.1.pos)))
         .map(|(e, l)| (e, *l))
 }
@@ -239,6 +241,7 @@ fn revive(t: &Tuning, p: &mut Player, body: &mut Body, prev: &mut PrevBody, acti
         found: p.found,
         picked: p.picked,
         slain: p.slain,
+        felled: p.felled,
         cmd_seq: p.cmd_seq,
         zone,
         ..Player::new(p.id, t)
@@ -343,9 +346,13 @@ pub fn encounter_tick(
         }
         events.push(SimEvent::BossDefeated);
         // The survivors catch their breath: full health and flasks refilled. The fallen
-        // (co-op) get back up at the arena's door.
+        // (co-op) get back up at the arena's door. The victory counts for everyone who was
+        // in the arena, fallen or not (the others weren't part of it).
         let mut it = players.iter_many_mut(&order);
         while let Some((e, mut p, mut b, mut prev, mut h, mut a, mut stop)) = it.fetch_next() {
+            if p.zone == Zone::Arena(arena) {
+                p.felled |= 1u32 << arena;
+            }
             if !h.dead() {
                 h.cur = h.max;
                 p.inventory.refill(t);

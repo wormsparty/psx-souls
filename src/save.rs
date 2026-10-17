@@ -6,9 +6,10 @@
 //! you then come back in front of the fog, and the boss starts over.
 //!
 //! Co-op: the host saves as in solo (it's its world). A guest keeps their own save: their
-//! character comes back from the host's world (weapon, inventory, discoveries, items picked up)
-//! and the bosses defeated there count, but their position and checkpoint stay those of their
-//! own world.
+//! character comes back from the host's world (weapon, inventory, discoveries, items and loot
+//! picked up), and so do the bosses and unique enemies defeated with them — a boss counts if
+//! they were in its arena when it fell, not the ones the host had already defeated. Their
+//! position and checkpoint stay those of their own world.
 //!
 //! Location: `save.ron` next to the settings (see `storage`).
 

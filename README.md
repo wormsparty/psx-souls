@@ -65,7 +65,7 @@ defeated bosses, kindled braziers, where it stands), each one with **their own c
 own character.
 
 ```sh
-# Each player, in game: rest at a brazier → Host online / Join online
+# Each player, in game: rest at a brazier → Kindle a beacon / Heed a beacon
 cargo run --release
 ```
 
@@ -73,7 +73,7 @@ By default the players meet through matchbox's public signaling server
 (`wss://match-0-13.helsing.studio`, run by its author, no guarantee it stays up): if it can't be
 reached, the game says so and stays solo. For your own, see below (`tools/lobby.sh`).
 
-- **Starting**: at a brazier, *Host online* or *Join online*, with an optional **password**
+- **Starting**: at a brazier, *Kindle a beacon* (host) or *Heed a beacon* (join), with an optional **password**
   (keyboard): only a player with the same one will find you; empty, anyone. While it searches,
   your character raises their arms and can't move; Esc / (B) gives up, and so does being hit.
   After **2 minutes** without a partner, the search stops. As soon as the guest arrives, they
@@ -85,9 +85,14 @@ reached, the game says so and stays solo. For your own, see below (`tools/lobby.
   in the arena. Both down: back to the checkpoint, the world starts over, as in solo.
 - **Shared world**: resting brings the enemies back for both; travelling takes both (each one
   keeps their character); a unique enemy defeated stays dead for both.
+- **Items**: each player sees the items they haven't picked up yet in their own game, and
+  picking one up doesn't take it away from the other. Enemies drop loot for each player
+  separately: you only see and pick up your own.
+- **Bosses**: a boss defeated together counts for both, as long as you were in its arena when it
+  fell (fallen or standing). The bosses the host had already defeated don't count for the guest.
 - **Saves**: the host saves as in solo (it's its world). The guest keeps their own save: they
-  bring back their character (weapon, items, items picked up, braziers discovered) and the
-  bosses defeated together, but stay where they were in their own world.
+  bring back their character (weapon, items, items picked up, braziers discovered), the bosses
+  and unique enemies defeated together, but stay where they were in their own world.
 - **Ending**: *Leave the co-op* at a brazier (or *Return to title screen*). The host stays in its
   world, alone again; the guest goes back to their own world. Same if the partner quits or loses
   the connection (4 s without news).
@@ -164,7 +169,7 @@ F3, F4 and F5 change the simulation: they're off in co-op.
   (cogwheel: Options, Help, Return to title screen, Quit). Esc / (B) closes the menu. While paused,
   characters and spells are frozen; particles keep going.
 - **Checkpoint** (when resting there): Leave (selected by default), Travel (to another brazier
-  already kindled, with a view of the place), Equipment, Host online / Join online (see
+  already kindled, with a view of the place), Equipment, Kindle a beacon / Heed a beacon (see
   *Online co-op*; in a co-op game: Leave the co-op).
 - **Rekindle the torch** (interacting with the extinguished torch of a defeated boss): the
   boss's portrait (`assets/ui/boss_<n>.png`, rendered by `tools/blender/boss_icons.py`);

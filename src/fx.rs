@@ -773,7 +773,7 @@ fn ambient(
     for i in (0..t.level.pickups.len()).filter(|i| picked & (1u64 << i) == 0) {
         emitters.push((encounter::pickup_pos(t, i) + Vec3::Y * 0.3, Ambient::Wisp, 7.0));
     }
-    for l in &loot {
+    for l in loot.iter().filter(|l| player.is_some_and(|p| p.id == l.owner)) {
         emitters.push((l.pos + Vec3::Y * 0.3, Ambient::Wisp, 7.0));
     }
     for p in t.level.props.iter().filter(|p| p.kind == Prop::Fountain) {

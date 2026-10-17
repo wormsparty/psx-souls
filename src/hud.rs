@@ -1069,7 +1069,7 @@ fn prompt(
     // Looking for a co-op partner: nothing to do but wait (and a notice takes the spot).
     let label = players.single().ok().filter(|(p, _, h)| !h.dead() && !net.searching() && net.notice_for <= 0.0 && matches!(p.state, PState::Free | PState::Guard)).and_then(
         |(p, b, _)| {
-            if near_loot(loot.iter(), b.pos).is_some() || near_pickup(&tuning, p.picked, b.pos).is_some() {
+            if near_loot(loot.iter(), p.id, b.pos).is_some() || near_pickup(&tuning, p.picked, b.pos).is_some() {
                 return Some((tr("Pick up", "Ramasser"), true));
             }
             if let Some(cp) = near_checkpoint(&tuning, b.pos).filter(|_| !enc.active) {

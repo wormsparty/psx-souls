@@ -110,8 +110,8 @@ pub enum SimEvent {
     EnemyAlert { entity: Entity },
     /// An enemy is defeated.
     EnemyDied { pos: Vec3 },
-    /// Its body disappears, a few moments later (leaving what it dropped, if anything).
-    EnemyVanished { pos: Vec3, loot: Option<items::Item> },
+    /// Its body disappears, a few moments later (leaving what it dropped, if anything: `Loot`).
+    EnemyVanished { pos: Vec3 },
     /// Item picked up (`level.pickups[pickup]`).
     PickedUp { entity: Entity, pickup: u16 },
     /// Item dropped by an enemy picked up.
@@ -340,8 +340,11 @@ pub fn spawn_fight(commands: &mut Commands, t: &Tuning, players: u8, progress: &
         }
         p.checkpoint = checkpoint as u8;
         p.found = me.found | (1 << checkpoint);
+        // Each one sees the items they haven't picked up yet, and keeps their own record of the
+        // enemies and bosses they defeated (the world's, the host's, decides who is there).
         p.picked = me.picked;
-        p.slain = me.slain | progress.slain;
+        p.slain = me.slain;
+        p.felled = me.defeated;
         p.zone = zone;
         let mut hp = Health::new(t.player.max_hp);
         if let Some(cur) = me.hp {
@@ -436,7 +439,7 @@ pub fn state_hash(world: &mut World) -> u64 {
             p.regain.to_bits().hash(&mut h);
             p.special.to_bits().hash(&mut h);
             p.inventory.hash(&mut h);
-            (p.picked, p.slain, p.found, p.checkpoint).hash(&mut h);
+            (p.picked, p.slain, p.felled, p.found, p.checkpoint).hash(&mut h);
             (p.ward_ticks, p.vigor_ticks).hash(&mut h);
             (p.airborne, p.air_vy.to_bits(), p.zone).hash(&mut h);
             id_of(world, p.lock).hash(&mut h);
@@ -463,7 +466,7 @@ pub fn state_hash(world: &mut World) -> u64 {
             for f in [l.pos.x, l.pos.y, l.pos.z] {
                 f.to_bits().hash(&mut h);
             }
-            l.item.hash(&mut h);
+            (l.item, l.owner).hash(&mut h);
         }
     }
     h.finish()

@@ -424,8 +424,8 @@ fn act_label(a: Act) -> &'static str {
         Act::Open(Page::Help) => tr("Help", "Aide"),
         Act::Open(Page::Travel) => tr("Travel", "Voyager"),
         Act::Open(_) => "…",
-        Act::OnlineHost => tr("Host online", "Héberger en ligne"),
-        Act::OnlineJoin => tr("Join online", "Rejoindre en ligne"),
+        Act::OnlineHost => tr("Kindle a beacon", "Allumer un fanal"),
+        Act::OnlineJoin => tr("Heed a beacon", "Répondre à un fanal"),
         Act::Search => tr("Search", "Lancer la recherche"),
         Act::LeaveCoop => tr("Leave the co-op", "Quitter la coopération"),
         Act::Back => tr("Back", "Retour"),
@@ -468,8 +468,8 @@ fn page_title(p: Page, device: Device) -> &'static str {
         Page::Help => tr("HELP — KEYBOARD AND MOUSE", "AIDE — CLAVIER ET SOURIS"),
         Page::Language => "LANGUAGE / LANGUE",
         Page::Style => tr("GRAPHICS STYLE", "STYLE GRAPHIQUE"),
-        Page::Online(true) => tr("HOST ONLINE", "HÉBERGER EN LIGNE"),
-        Page::Online(false) => tr("JOIN ONLINE", "REJOINDRE EN LIGNE"),
+        Page::Online(true) => tr("KINDLE A BEACON", "ALLUMER UN FANAL"),
+        Page::Online(false) => tr("HEED A BEACON", "RÉPONDRE À UN FANAL"),
     }
 }
 
@@ -491,9 +491,13 @@ fn page_info(p: Page) -> &'static str {
             "Talisman et armes, puis les emplacements rapides (« Objet suivant » passe de l'un à l'autre en jeu). Choisir un emplacement pour le changer.",
         ),
         Page::Choose => tr("What goes in this slot.", "Ce que contiendra cet emplacement."),
-        Page::Online(_) => tr(
-            "Optional password: only a player with the same one will find you. Empty: anyone. Searching for 2 minutes at most.",
-            "Mot de passe facultatif : seul un joueur avec le même vous trouvera. Vide : n'importe qui. Recherche pendant 2 minutes au plus.",
+        Page::Online(true) => tr(
+            "Your beacon will call another player into your world. Optional password: only a player with the same one will see it. Empty: anyone. It burns for 2 minutes at most.",
+            "Votre fanal appellera un autre joueur dans votre monde. Mot de passe facultatif : seul un joueur avec le même le verra. Vide : n'importe qui. Il brûle 2 minutes au plus.",
+        ),
+        Page::Online(false) => tr(
+            "Answer another player's beacon and join their world. Optional password: only the beacon lit with the same one. Empty: anyone's. Searching for 2 minutes at most.",
+            "Répondez au fanal d'un autre joueur et rejoignez son monde. Mot de passe facultatif : seul le fanal allumé avec le même. Vide : n'importe lequel. Recherche pendant 2 minutes au plus.",
         ),
         _ => "",
     }
@@ -707,6 +711,9 @@ struct TitleGem(u8);
 /// Title screen: note at the bottom recommending a gamepad.
 #[derive(Component)]
 struct TitleNote;
+/// Title screen: tagline slanted under the title's right end.
+#[derive(Component)]
+struct TitleTagline;
 #[derive(Component)]
 struct MenuInfo;
 #[derive(Component)]
@@ -759,7 +766,7 @@ impl Plugin for MenuPlugin {
             .add_systems(OnEnter(AppState::Title), enter_title)
             .add_systems(
                 Update,
-                (open_on_rest.run_if(in_state(AppState::Playing)), menu_input, refresh_menu, title_backdrop, title_gems, title_note, fork_badge)
+                (open_on_rest.run_if(in_state(AppState::Playing)), menu_input, refresh_menu, title_backdrop, title_gems, title_note, title_tagline, fork_badge)
                     .chain()
                     .after(crate::fx::consume_events)
                     .run_if(not(in_state(AppState::Loading))),
@@ -811,6 +818,13 @@ fn spawn_menu(mut commands: Commands, ui_font: Res<UiFont>, preview: Res<Checkpo
                             ForkSlot,
                         ))
                         .with_child((Button, Hint::new(2, Color::WHITE), hint_node(), ForkBadge));
+                        c.spawn((
+                            ui_font.text("", 1, Color::srgb(1.0, 0.78, 0.3)),
+                            TextLayout::linebreak(LineBreak::NoWrap),
+                            Node { position_type: PositionType::Absolute, top: percent(100), right: px(-12), display: Display::None, ..default() },
+                            UiTransform { rotation: Rot2::degrees(-8.0), ..default() },
+                            TitleTagline,
+                        ));
                     });
                     c.spawn((
                         Node { display: Display::None, align_self: AlignSelf::Center, column_gap: px(10), margin: UiRect::bottom(px(24)), ..default() },
@@ -1010,6 +1024,18 @@ fn title_note(menu: Res<MenuState>, mut note: Single<(&mut Node, &mut Hint), Wit
     }
     if shown {
         set_hint(&mut note.1, vec![i(Glyph::Gamepad), t(tr("Gamepad recommended", "Manette recommandée"))]);
+    }
+}
+
+fn title_tagline(menu: Res<MenuState>, mut tagline: Single<(&mut Node, &mut Text), With<TitleTagline>>) {
+    let shown = menu.open && menu.page == Page::Title;
+    let want = if shown { Display::Flex } else { Display::None };
+    if tagline.0.display != want {
+        tagline.0.display = want;
+    }
+    let text = tr("Now with coop!", "Maintenant en coop !");
+    if shown && tagline.1.0 != text {
+        tagline.1.0 = text.into();
     }
 }
 
@@ -1838,6 +1864,9 @@ fn build_rows(w: &mut World, list: Entity, entries: &[Entry], page: Page) {
                         c.spawn((Button, left.clone(), Arrow(i, -1)));
                         c.spawn((
                             ui_font.text("", 1, Color::srgb(0.95, 0.92, 0.85)),
+                            // No line wrapping: otherwise a value with spaces ("(none) — type it") is
+                            // estimated taller, and the panel jumps when it changes (typing the password).
+                            TextLayout::linebreak(LineBreak::NoWrap),
                             Node { min_width: px(240), justify_content: JustifyContent::Center, ..default() },
                             RowValue(i),
                         ));

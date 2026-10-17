@@ -990,10 +990,10 @@ fn hounds_wake_together_bite_and_drop_loot() {
     assert!(events(&mut app).iter().any(|e| matches!(e, SimEvent::EnemyDied { .. })));
     steps(&mut app, t.enemies[hound].death.total + psx_souls::sim::enemy::VANISH_TICKS + 40, IDLE);
     assert!(app.world().get_entity(dog).is_err(), "the body has disappeared");
-    assert!(events(&mut app).iter().any(|e| matches!(e, SimEvent::EnemyVanished { loot: Some(Item::WardingAsh), .. })));
+    assert!(events(&mut app).iter().any(|e| matches!(e, SimEvent::EnemyVanished { .. })));
     let loot: Vec<Loot> = app.world_mut().query::<&Loot>().iter(app.world()).copied().collect();
     assert_eq!(loot.len(), 1);
-    assert_eq!(loot[0].item, Item::WardingAsh);
+    assert_eq!((loot[0].item, loot[0].owner), (Item::WardingAsh, 0));
 
     // Picked up: into the inventory, gone from the ground.
     app.world_mut().get_mut::<Body>(p).unwrap().pos = loot[0].pos + Vec3::new(0.6, 0.0, 0.0);

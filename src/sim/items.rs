@@ -109,10 +109,14 @@ pub const QUICK_SLOTS: usize = 4;
 
 /// Item dropped by a defeated enemy (`EnemyDef::loot`), glowing on the ground where its body
 /// vanished. It stays there until it's picked up or the world is reset (death, travel).
+///
+/// Co-op: each player rolls their own drop, which only they see and can pick up (`owner`).
 #[derive(Component, Clone, Copy, Debug, PartialEq)]
 pub struct Loot {
     pub pos: Vec3,
     pub item: Item,
+    /// The player it's for (`Player::id`).
+    pub owner: u8,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]

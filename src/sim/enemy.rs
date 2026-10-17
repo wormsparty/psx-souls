@@ -6,7 +6,7 @@
 //! - they chase and attack like the boss (weighted choice, cooldowns, pauses
 //!   where you can punish);
 //! - too far from their post, they give up, go back and heal;
-//! - once defeated, they disappear, sometimes leaving an item behind (`EnemyDef::loot`). They all come back when you
+//! - once defeated, they disappear, sometimes leaving an item behind (`EnemyDef::loot`, one roll per player). They all come back when you
 //!   rest or die, except the unique ones.
 
 use bevy::prelude::*;
@@ -228,11 +228,15 @@ pub fn enemy_act(
                 e.dead_ticks += 1;
                 if e.dead_ticks >= VANISH_TICKS {
                     commands.entity(entity).despawn();
-                    let loot = roll_loot(d, &mut rng);
-                    if let Some(item) = loot {
-                        commands.spawn((SimEntity, Loot { pos: body.pos, item }));
+                    // A roll for each player (co-op: everyone gets their own drop), by id.
+                    let mut ids: Vec<u8> = players.iter().map(|(.., p)| p.id).collect();
+                    ids.sort_unstable();
+                    for owner in ids {
+                        if let Some(item) = roll_loot(d, &mut rng) {
+                            commands.spawn((SimEntity, Loot { pos: body.pos, item, owner }));
+                        }
                     }
-                    events.push(SimEvent::EnemyVanished { pos: body.pos, loot });
+                    events.push(SimEvent::EnemyVanished { pos: body.pos });
                 }
             }
             continue;
