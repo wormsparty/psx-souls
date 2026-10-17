@@ -9,6 +9,7 @@ use bevy::window::PrimaryWindow;
 use crate::fx::FxState;
 use crate::input::Device;
 use crate::lang::{Localized, tr};
+use crate::sim::input::MAX_PLAYERS;
 use crate::menu::MenuState;
 use crate::render::camera::{LockFoes, PartBones, lock_target};
 use crate::render::ps1::{LowResTarget, WorldCamera};
@@ -26,6 +27,8 @@ use crate::sim::world::Zone;
 use crate::ui::{Glyph, Hint, PixelSize, UiFont, hint_node, i, image_bundle, set_hint, t};
 
 const HP_PX: f32 = 0.51; // px per HP
+/// The allies' bars, half as long.
+const ALLY_HP_PX: f32 = HP_PX * 0.5;
 const ST_PX: f32 = 2.0; // px per stamina point
 const SP_PX: f32 = 0.6; // px per special gauge point
 const SPECIAL: Color = Color::srgb(0.9, 0.7, 0.25);
@@ -114,6 +117,22 @@ struct PopupInfo;
 /// Active effects (resin, moss, ash, root).
 #[derive(Component)]
 struct Effects;
+/// Co-op: line of an ally (the n-th other player, by number), their name and health.
+#[derive(Component)]
+struct AllyRow(u8);
+#[derive(Component)]
+struct AllyName(u8);
+#[derive(Component)]
+struct AllyHp(u8);
+/// Co-op: connection quality.
+#[derive(Component)]
+struct NetLine;
+/// Co-op: the partner search, or the last notice.
+#[derive(Component)]
+struct SearchLine;
+/// Co-op: the number floating over an ally's head (the player it follows).
+#[derive(Component)]
+struct AllyTag(Entity);
 /// Floating health bar of an enemy (and the enemy it follows).
 #[derive(Component)]
 struct FoeBar(Entity);
@@ -216,6 +235,9 @@ impl Plugin for HudPlugin {
                     popup,
                     effects,
                     foe_bars,
+                    allies,
+                    ally_tags,
+                    search_line,
                 )
                     .run_if(in_state(AppState::Playing))
                     .after(crate::fx::consume_events),
@@ -699,6 +721,31 @@ fn setup(mut commands: Commands, tuning: Res<Tuning>, font: Res<UiFont>, mut ima
                     });
             });
             c.spawn((font.text("", 1, GOLD), Effects));
+            // Co-op: the allies' health, then the connection.
+            for slot in 0..MAX_PLAYERS as u8 - 1 {
+                c.spawn((Node { column_gap: px(6), align_items: AlignItems::Center, display: Display::None, ..default() }, AllyRow(slot)))
+                    .with_children(|c| {
+                        c.spawn((font.text("", 1, GOLD), AllyName(slot)));
+                        c.spawn((
+                            Node { width: px(p.max_hp * ALLY_HP_PX + 4.0), height: px(8), padding: UiRect::all(px(2)), ..default() },
+                            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.7)),
+                        ))
+                        .with_children(|c| {
+                            c.spawn((Node { width: px(0), height: px(4), ..default() }, BackgroundColor(Color::srgb(0.72, 0.1, 0.08)), AllyHp(slot)));
+                        });
+                    });
+            }
+            c.spawn((font.text("", 1, Color::srgb(0.7, 0.75, 0.8)), NetLine));
+        });
+
+    // Co-op: the search for a partner (time left, how to give up), or why it stopped.
+    commands
+        .spawn((
+            ChildOf(root),
+            Node { position_type: PositionType::Absolute, width: percent(100), bottom: px(100), justify_content: JustifyContent::Center, ..default() },
+        ))
+        .with_children(|c| {
+            c.spawn((font.text("", 1, GOLD), SearchLine));
         });
 
     // Equipped weapon and quick item, bottom left: a box with the icon, and next to it the name,
@@ -1012,13 +1059,15 @@ fn prompt(
     device: Res<Device>,
     enc: Res<Encounter>,
     menu: Res<MenuState>,
+    net: Res<crate::net::Net>,
     players: Query<(&Player, &Body, &Health), With<LocalPlayer>>,
     loot: Query<(Entity, &Loot)>,
     mut root: Query<(&mut Visibility, &Children), With<Prompt>>,
     mut hints: Query<&mut Hint>,
 ) {
     // Picking up takes priority over resting (same button). (text, with the key?)
-    let label = players.single().ok().filter(|(p, _, h)| !h.dead() && matches!(p.state, PState::Free | PState::Guard)).and_then(
+    // Looking for a co-op partner: nothing to do but wait (and a notice takes the spot).
+    let label = players.single().ok().filter(|(p, _, h)| !h.dead() && !net.searching() && net.notice_for <= 0.0 && matches!(p.state, PState::Free | PState::Guard)).and_then(
         |(p, b, _)| {
             if near_loot(loot.iter(), b.pos).is_some() || near_pickup(&tuning, p.picked, b.pos).is_some() {
                 return Some((tr("Pick up", "Ramasser"), true));
@@ -1208,13 +1257,14 @@ fn outcome(
     time: Res<Time>,
     fx: Res<FxState>,
     enc: Res<Encounter>,
+    local: Query<(), With<LocalPlayer>>,
     mut out: ResMut<Outcome>,
     mut banner: Query<(&mut Visibility, &mut BackgroundColor), With<Banner>>,
     mut texts: Query<(&mut Text, &mut TextColor), With<BannerText>>,
 ) {
     for e in &fx.last {
         match e {
-            SimEvent::PlayerDied => {
+            SimEvent::PlayerDied { entity } if local.contains(*entity) => {
                 *out = Outcome { text: Some((("YOU DIED", "VOUS ÊTES MORT"), Color::srgb(0.75, 0.12, 0.08))), ..default() };
             }
             SimEvent::BossDefeated => {
@@ -1224,10 +1274,11 @@ fn outcome(
             SimEvent::DoorOpened => {
                 out.next = Some((("A GREAT DOOR HAS OPENED", "UNE GRANDE PORTE S'EST OUVERTE"), Color::srgb(0.8, 0.85, 0.95)));
             }
-            SimEvent::Kindled { .. } => {
+            SimEvent::Kindled { entity, .. } if local.contains(*entity) => {
                 *out = Outcome { text: Some((("BRAZIER KINDLED", "BRASIER RANIMÉ"), Color::srgb(0.95, 0.78, 0.4))), duration: Some(3.5), ..default() };
             }
             SimEvent::Respawned => *out = Outcome::default(),
+            SimEvent::Revived { entity } if local.contains(*entity) => *out = Outcome::default(),
             _ => {}
         }
     }
@@ -1262,7 +1313,7 @@ fn overlay(
     time: Res<Time>,
     fx: Res<FxState>,
     mut anim: ResMut<HudAnim>,
-    players: Query<&Player, With<LocalPlayer>>,
+    players: Query<(Entity, &Player), With<LocalPlayer>>,
     mut flash: Query<&mut BackgroundColor, (With<Overlay>, Without<Fade>)>,
     mut fade: Query<&mut BackgroundColor, (With<Fade>, Without<Overlay>)>,
 ) {
@@ -1278,13 +1329,16 @@ fn overlay(
     // Death: the scene darkens during "YOU DIED", fully black just before the
     // respawn at the checkpoint, then gradually back.
     // Through a fog: from black, into the arena (or back out).
-    if fx.last.iter().any(|e| matches!(e, SimEvent::Respawned | SimEvent::Passage { .. })) {
+    let me = players.single().ok();
+    let mine = |e: &Entity| me.is_some_and(|(m, _)| m == *e);
+    if fx.last.iter().any(|e| matches!(e, SimEvent::Respawned) || matches!(e, SimEvent::Passage { entity, .. } | SimEvent::Revived { entity } if mine(entity))) {
         anim.fade = 1.0;
     }
-    let dying = fx_dying(&fx, &mut anim);
-    let target = match players.single() {
-        Ok(p) if p.state == PState::Dead && p.dead_ticks + 45 >= RESPAWN_TICKS => 1.0,
-        Ok(p) if p.state == PState::Dead || dying => 0.4,
+    let dying = fx_dying(&fx, &mut anim, me.map(|(e, _)| e));
+    // Co-op, fallen during a boss fight: past the respawn time, they watch the others.
+    let target = match me.map(|(_, p)| p) {
+        Some(p) if p.state == PState::Dead && (RESPAWN_TICKS.saturating_sub(45)..=RESPAWN_TICKS).contains(&p.dead_ticks) => 1.0,
+        Some(p) if p.state == PState::Dead || dying => 0.4,
         _ => 0.0,
     };
     let dt = time.delta_secs();
@@ -1334,11 +1388,12 @@ fn reticle(
 }
 
 /// True between the fatal blow and the end of the death animation.
-fn fx_dying(fx: &FxState, anim: &mut HudAnim) -> bool {
-    if fx.last.contains(&SimEvent::PlayerDied) {
+fn fx_dying(fx: &FxState, anim: &mut HudAnim, local: Option<Entity>) -> bool {
+    let mine = |e: &Entity| local == Some(*e);
+    if fx.last.iter().any(|e| matches!(e, SimEvent::PlayerDied { entity } if mine(entity))) {
         anim.dying = true;
     }
-    if fx.last.contains(&SimEvent::Respawned) {
+    if fx.last.iter().any(|e| matches!(e, SimEvent::Respawned) || matches!(e, SimEvent::Revived { entity } if mine(entity))) {
         anim.dying = false;
     }
     anim.dying
@@ -1356,14 +1411,18 @@ fn popup(
     mut icon: Query<&mut ImageNode, With<PopupIcon>>,
     mut name: Query<&mut Text, (With<PopupName>, Without<PopupInfo>)>,
     mut info: Query<&mut Text, (With<PopupInfo>, Without<PopupName>)>,
+    local: Query<(), With<LocalPlayer>>,
 ) {
     for e in &fx.last {
-        if let SimEvent::PickedUp { pickup, .. } = e
+        if let SimEvent::PickedUp { pickup, entity } = e
+            && local.contains(*entity)
             && let Some(p) = tuning.level.pickups.get(*pickup as usize)
         {
             pop.queue.extend(p.items.iter().copied());
         }
-        if let SimEvent::LootPicked { item, .. } = e {
+        if let SimEvent::LootPicked { item, entity } = e
+            && local.contains(*entity)
+        {
             pop.queue.push_back((*item, 1));
         }
     }
@@ -1395,6 +1454,52 @@ fn popup(
     }
 }
 
+/// Co-op: the partner's health ("Host" / "Guest", greyed once fallen), and the connection: round
+/// trip, a peer gone silent, a desync (the games no longer match: a bug to report).
+#[allow(clippy::type_complexity)]
+fn allies(
+    net: Res<crate::net::Net>,
+    local: Res<crate::net::LocalId>,
+    players: Query<(&Player, &Health)>,
+    mut rows: Query<(&AllyRow, &mut Node), Without<AllyHp>>,
+    mut names: Query<(&AllyName, &mut Text, &mut TextColor), Without<NetLine>>,
+    mut hps: Query<(&AllyHp, &mut Node), Without<AllyRow>>,
+    mut line: Query<&mut Text, (With<NetLine>, Without<AllyName>)>,
+) {
+    let mut others: Vec<(&Player, &Health)> = players.iter().filter(|(p, _)| p.id != local.0).collect();
+    others.sort_by_key(|(p, _)| p.id);
+    let at = |slot: u8| others.get(slot as usize).copied();
+    for (r, mut n) in &mut rows {
+        let want = if at(r.0).is_some() { Display::Flex } else { Display::None };
+        if n.display != want {
+            n.display = want;
+        }
+    }
+    for (a, mut t, mut c) in &mut names {
+        let Some((p, h)) = at(a.0) else { continue };
+        set_text(&mut t, role_name(p.id));
+        c.0 = if h.dead() { Color::srgba(0.6, 0.58, 0.55, 0.7) } else { GOLD };
+    }
+    for (a, mut n) in &mut hps {
+        if let Some((_, h)) = at(a.0) {
+            n.width = px(h.cur.max(0.0) * ALLY_HP_PX);
+        }
+    }
+    let s = &net.status;
+    let text = if !net.coop() {
+        String::new()
+    } else if let Some(f) = s.desync {
+        format!("{} ({f})", tr("DESYNC", "DÉSYNCHRONISATION"))
+    } else if s.interrupted {
+        tr("Connection unstable…", "Connexion instable…").into()
+    } else {
+        s.ping_ms.map_or(String::new(), |ms| format!("{ms} ms"))
+    };
+    for mut t in &mut line {
+        set_text(&mut t, text.clone());
+    }
+}
+
 /// Active effects, under the bars: resin (flaming weapon), moss (regeneration), ash
 /// (protection), root (stamina).
 fn effects(players: Query<&Player, With<LocalPlayer>>, mut q: Query<&mut Text, With<Effects>>) {
@@ -1411,6 +1516,73 @@ fn effects(players: Query<&Player, With<LocalPlayer>>, mut q: Query<&mut Text, W
     .collect();
     for mut t in &mut q {
         set_text(&mut t, parts.join("   "));
+    }
+}
+
+/// Co-op: the partner search (and how to give up), or for a few seconds why the co-op stopped.
+fn search_line(net: Res<crate::net::Net>, device: Res<crate::input::Device>, mut q: Query<&mut Text, With<SearchLine>>) {
+    let text = if net.searching() {
+        let cancel = if *device == crate::input::Device::Gamepad { tr("(B): cancel", "(B) : annuler") } else { tr("Esc: cancel", "Échap : annuler") };
+        format!("{}   {cancel}", crate::net::search_text(&net))
+    } else if net.notice_for > 0.0 {
+        crate::net::notice_text(net.notice.as_ref())
+    } else {
+        String::new()
+    };
+    for mut t in &mut q {
+        set_text(&mut t, &text);
+    }
+}
+
+/// Co-op: what a player is called — the host (player 0) or the guest.
+fn role_name(id: u8) -> &'static str {
+    if id == 0 { tr("Host", "Hôte") } else { tr("Guest", "Invité") }
+}
+
+/// Co-op: "Host" / "Guest" over the partner's head (they all look alike), within sight.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn ally_tags(
+    mut commands: Commands,
+    root: Single<Entity, With<HudRoot>>,
+    font: Res<UiFont>,
+    me: Query<&Interp, With<LocalPlayer>>,
+    allies: Query<(Entity, &Player, &Interp, &Body, &Health), Without<LocalPlayer>>,
+    camera: Single<(&Camera, &GlobalTransform), With<WorldCamera>>,
+    target: Res<LowResTarget>,
+    window: Single<&Window, With<PrimaryWindow>>,
+    ui_scale: Res<UiScale>,
+    mut tags: Query<(Entity, &AllyTag, &mut Node, &mut Visibility)>,
+) {
+    let (cam, gt) = *camera;
+    let sx = window.width() / target.size.x as f32;
+    let sy = window.height() / target.size.y as f32;
+    let mut tagged: Vec<Entity> = Vec::new();
+    for (e, tag, mut node, mut vis) in &mut tags {
+        let Ok((_, _, i, b, h)) = allies.get(tag.0) else {
+            commands.entity(e).despawn();
+            continue;
+        };
+        tagged.push(tag.0);
+        let near = me.single().is_ok_and(|m| m.pos.distance(i.pos) < 40.0);
+        let vp = cam.world_to_viewport(gt, i.pos + Vec3::Y * (b.height + 0.45)).ok().filter(|_| near && !h.dead());
+        let Some(vp) = vp else {
+            *vis = Visibility::Hidden;
+            continue;
+        };
+        *vis = Visibility::Inherited;
+        node.left = px(vp.x * sx / ui_scale.0 - 6.0);
+        node.top = px(vp.y * sy / ui_scale.0 - 6.0);
+    }
+    for (e, p, ..) in &allies {
+        if !tagged.contains(&e) {
+            commands.spawn((
+                ChildOf(*root),
+                AllyTag(e),
+                font.text(role_name(p.id), 1, GOLD),
+                Node { position_type: PositionType::Absolute, ..default() },
+                Visibility::Hidden,
+            ));
+        }
     }
 }
 

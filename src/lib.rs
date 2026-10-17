@@ -2,7 +2,8 @@
 //!
 //! - `sim`: deterministic simulation at 60 ticks/s (no dependency on rendering);
 //! - `render`, `fx`, `hud`: presentation, which only reads the simulation;
-//! - `input`: devices → `PlayerInput`.
+//! - `input`: devices → `PlayerInput`;
+//! - `net`: online co-op (peer-to-peer rollback).
 
 pub mod config;
 pub mod debug;
@@ -11,6 +12,7 @@ pub mod hud;
 pub mod input;
 pub mod lang;
 pub mod menu;
+pub mod net;
 pub mod render;
 pub mod save;
 pub mod settings;
@@ -69,14 +71,21 @@ pub fn run() {
         fx::FxPlugin,
         hud::HudPlugin,
         save::SavePlugin,
+        net::NetPlugin,
         debug::DebugPlugin,
         debug::AutoShotPlugin,
     ))
     .add_systems(
         FixedUpdate,
-        (input::collect_local_input, sim::run_sim_tick)
+        (
+            input::collect_local_input,
+            // Solo: the menu pauses the game.
+            (input::feed_solo, sim::run_sim_tick).chain().run_if(net::solo.and_then(menu::menu_closed)),
+            // Co-op: the rollback session decides which ticks to simulate.
+            net::coop_tick.run_if(net::coop_running),
+        )
             .chain()
-            .run_if(in_state(AppState::Playing).and_then(menu::menu_closed)),
+            .run_if(in_state(AppState::Playing)),
     );
     app.run();
 }

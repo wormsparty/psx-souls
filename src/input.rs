@@ -40,11 +40,17 @@ pub struct LookInput {
     pub recenter: bool,
 }
 
+/// This machine's input for the upcoming tick: the solo player's, or sent to the others in
+/// co-op (`net`).
+#[derive(Resource, Clone, Copy, Debug, Default)]
+pub struct LocalInput(pub PlayerInput);
+
 pub struct InputPlugin;
 
 impl Plugin for InputPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<InputLatch>()
+            .init_resource::<LocalInput>()
             .init_resource::<Device>()
             .init_resource::<LookInput>()
             .add_systems(
@@ -53,7 +59,9 @@ impl Plugin for InputPlugin {
             )
             .add_systems(Update, (grab_cursor, read_look));
         #[cfg(target_arch = "wasm32")]
-        app.add_systems(Update, sync_pointer_lock.before(grab_cursor));
+        app.add_systems(Startup, web_mouse::listen)
+            .add_systems(PreUpdate, web_mouse::replace_motion.after(bevy::input::InputSystems).before(triggers_from_axes))
+            .add_systems(Update, sync_pointer_lock.before(grab_cursor));
     }
 }
 
@@ -276,16 +284,30 @@ fn latch_presses(
     }
 }
 
-/// Builds the local player's input for the upcoming simulation tick.
+/// Solo: the local input is the first player's.
+pub fn feed_solo(local: Res<LocalInput>, mut inputs: ResMut<PlayerInputs>) {
+    inputs.0[0] = local.0;
+}
+
+/// Builds the local player's input for the upcoming simulation tick. Menu open (co-op, where
+/// the game goes on) or looking for a co-op partner: they stand still.
+#[allow(clippy::too_many_arguments)]
 pub fn collect_local_input(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
     gamepads: Query<&Gamepad>,
     rig: Res<CameraRig>,
+    menu: Res<MenuState>,
+    net: Res<crate::net::Net>,
     mut latch: ResMut<InputLatch>,
-    mut inputs: ResMut<PlayerInputs>,
+    mut local: ResMut<LocalInput>,
     cursor: Single<&CursorOptions, With<PrimaryWindow>>,
 ) {
+    if menu.open || net.searching() {
+        latch.pressed = 0;
+        local.0 = PlayerInput { cam_yaw: PlayerInput::quantize_yaw(rig.yaw), ..default() };
+        return;
+    }
     let grabbed = cursor.grab_mode != CursorGrabMode::None;
     let mut held = keyboard_buttons(&keys, grabbed.then_some(&*mouse), false);
     for g in &gamepads {
@@ -315,11 +337,12 @@ pub fn collect_local_input(
             stick = s.clamp_length_max(1.0);
         }
     }
-    inputs.0[0] = PlayerInput {
+    local.0 = PlayerInput {
         buttons,
         move_x: PlayerInput::quantize_axis(stick.x),
         move_y: PlayerInput::quantize_axis(stick.y),
         cam_yaw: PlayerInput::quantize_yaw(rig.yaw),
+        cmd: [0; 4],
     };
 }
 
@@ -386,5 +409,39 @@ fn sync_pointer_lock(
         *unlocked = 0.0;
         cursor.grab_mode = CursorGrabMode::None;
         cursor.visible = true;
+    }
+}
+
+/// Web: winit rebuilds the mouse delta from the positions of Firefox's coalesced events, which
+/// are inconsistent under pointer lock (jumps, the camera spins for a slow movement).
+/// Read `movementX/Y` straight from the browser instead.
+#[cfg(target_arch = "wasm32")]
+mod web_mouse {
+    use std::cell::Cell;
+
+    use bevy::input::mouse::AccumulatedMouseMotion;
+    use bevy::prelude::*;
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen::closure::Closure;
+
+    thread_local! {
+        static MOTION: Cell<Vec2> = const { Cell::new(Vec2::ZERO) };
+    }
+
+    pub fn listen() {
+        let Some(document) = web_sys::window().and_then(|w| w.document()) else { return };
+        let doc = document.clone();
+        let on_move = Closure::<dyn FnMut(web_sys::MouseEvent)>::new(move |e: web_sys::MouseEvent| {
+            if doc.pointer_lock_element().is_some() {
+                let d = Vec2::new(e.movement_x() as f32, e.movement_y() as f32);
+                MOTION.with(|m| m.set(m.get() + d));
+            }
+        });
+        let _ = document.add_event_listener_with_callback("mousemove", on_move.as_ref().unchecked_ref());
+        on_move.forget();
+    }
+
+    pub fn replace_motion(mut motion: ResMut<AccumulatedMouseMotion>) {
+        motion.delta = MOTION.with(|m| m.replace(Vec2::ZERO));
     }
 }

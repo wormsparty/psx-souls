@@ -319,6 +319,14 @@
    30.0
   ]
  },
+ "summon": {
+  "frames": 120.0,
+  "loop": true,
+  "marks": [
+   0,
+   120.0
+  ]
+ },
  "switch": {
   "frames": 24.0,
   "loop": false,

@@ -1,8 +1,10 @@
 //! A player's abstract inputs for one tick. It's the only thing the simulation reads
-//! on the player side: over the network, it's exactly what will be exchanged between peers.
+//! on the player side: over the network, it's exactly what is exchanged between peers.
 
 use bevy::prelude::*;
+use serde::{Deserialize, Serialize};
 
+/// Co-op: two players.
 pub const MAX_PLAYERS: usize = 2;
 
 /// Logical buttons (bitfield).
@@ -33,8 +35,8 @@ pub mod btn {
     pub const COUNT: usize = 16;
 }
 
-/// A player's compact input for one tick (7 bytes, ready to be serialised for the network).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+/// A player's compact input for one tick (10 bytes, what travels over the network).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PlayerInput {
     pub buttons: u16,
     /// Quantised movement stick (-127..=127). y = towards the camera's forward.
@@ -42,6 +44,10 @@ pub struct PlayerInput {
     pub move_y: i8,
     /// Camera yaw quantised on 16 bits (movement is relative to the camera).
     pub cam_yaw: i16,
+    /// A decision taken in a menu (equip, travel…), encoded by `SimCommand::encode`: its number
+    /// (0: none), its kind and two arguments. The same number twice (an input predicted by
+    /// repeating the last one) is only applied once.
+    pub cmd: [u8; 4],
 }
 
 impl PlayerInput {

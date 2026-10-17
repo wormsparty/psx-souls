@@ -268,6 +268,15 @@ anim("heal", [
     (30, merge(DRINK, {"chest": (6, 0, 14)})), ("T", STANCE_R),
 ])
 
+# Summoning (online co-op search, at the brazier): both arms raised to the sky, swaying slowly.
+SUMMON = merge(legs(-6, 8, 6, 8, -0.02), {"chest": (-10, 0, 0), "head": (-22, 0, 0)},
+               arm("R", (-150, 38, 0), (-15, 0, 0), (40, 0, 0)),
+               arm("L", (-150, -38, 0), (-15, 0, 0), (0, 0, 0)))
+SUMMON_SWAY = merge(SUMMON, {"chest": (-14, 0, 0), "head": (-28, 0, 0)},
+                    arm("R", (-158, 44, 0), (-8, 0, 0), (40, 0, 0)),
+                    arm("L", (-158, -44, 0), (-8, 0, 0), (0, 0, 0)))
+anim("summon", [(0, SUMMON), (60, SUMMON_SWAY), (120, SUMMON)], loop=True)
+
 # ----------------------------------------------------------------------------- rapier
 LUNGE = legs(-50, 45, 30, 8, -0.12, twist=25, fwd=0.12)
 PULL_R = merge(STANCE_R, {"chest": (2, 0, 30)}, arm("R", (-15, 18, 0), (-85, 0, 0), (85, 0, 0)))

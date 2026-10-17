@@ -5,6 +5,11 @@
 //! rewritten if it has changed. You resume where you left off — except mid boss fight:
 //! you then come back in front of the fog, and the boss starts over.
 //!
+//! Co-op: the host saves as in solo (it's its world). A guest keeps their own save: their
+//! character comes back from the host's world (weapon, inventory, discoveries, items picked up)
+//! and the bosses defeated there count, but their position and checkpoint stay those of their
+//! own world.
+//!
 //! Location: `save.ron` next to the settings (see `storage`).
 
 use bevy::prelude::*;
@@ -112,7 +117,8 @@ fn autosave_triggers(
                 | SimEvent::BossDefeated
                 | SimEvent::BossRevived { .. }
                 | SimEvent::Passage { .. }
-                | SimEvent::PlayerDied
+                | SimEvent::PlayerDied { .. }
+                | SimEvent::Revived { .. }
                 | SimEvent::Respawned
                 | SimEvent::Heal { .. }
                 | SimEvent::WeaponSwitched { .. }
@@ -138,14 +144,33 @@ fn flush(world: &mut World) {
     }
 }
 
-/// Current progress of the local player (`None` outside a game).
+/// Current progress of the local player (`None` outside a game). A co-op guest's: their own
+/// save, with their character back from the host's world.
 pub fn capture(world: &mut World) -> Option<Progress> {
     let enc = *world.resource::<Encounter>();
     let tuning = world.resource::<Tuning>().clone();
+    let local = world.resource::<crate::net::LocalId>().0;
     let mut q = world.query::<(&Player, &Body, &Health)>();
-    q.iter(world)
-        .min_by_key(|(p, ..)| p.id)
-        .map(|(p, b, h)| Progress::of_player(p, b, h, &enc, &tuning))
+    let progress = q.iter(world).find(|(p, ..)| p.id == local).map(|(p, b, h)| Progress::of_player(p, b, h, &enc, &tuning))?;
+    let net = world.resource::<crate::net::Net>();
+    Some(match (&net.guest_base, net.role) {
+        (Some(base), crate::net::Role::Guest) => guest_progress(base, &progress),
+        _ => progress,
+    })
+}
+
+/// A guest's save after (or during) a co-op game: `base`, their own save when they joined,
+/// with the character they play in the host's world (`coop`).
+pub fn guest_progress(base: &Progress, coop: &Progress) -> Progress {
+    Progress {
+        defeated: base.defeated | coop.defeated,
+        weapon: coop.weapon,
+        inventory: coop.inventory.clone(),
+        found: base.found | coop.found,
+        picked: base.picked | coop.picked,
+        slain: base.slain | coop.slain,
+        ..base.clone()
+    }
 }
 
 /// Writes the save right away (if a game is in progress).

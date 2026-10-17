@@ -5,12 +5,12 @@ use std::collections::HashMap;
 
 use bevy::animation::AnimationPlayer;
 use bevy::camera::visibility::RenderLayers;
-use bevy::gltf::Gltf;
+use bevy::gltf::{Gltf, GltfMaterialName};
 use bevy::prelude::*;
 use bevy::world_serialization::{WorldAssetRoot, WorldInstanceReady};
 use serde::Deserialize;
 
-use super::ps1::{Ps1Lighting, Ps1Material, PointLightPs1, TintMeshes, set_tint};
+use super::ps1::{Ps1Lighting, Ps1Material, Ps1Swapped, PointLightPs1, TintMeshes, set_tint};
 use super::{AppState, Interp, LocalPlayer};
 use crate::sim::boss::{Boss, unblockable_pending};
 use crate::sim::data::{BossMove, MoveDef, MoveRef, Tuning};
@@ -219,6 +219,7 @@ impl Plugin for ModelsPlugin {
                     .after(super::interpolate),
             )
             .add_systems(Update, flicker.run_if(not(in_state(AppState::Loading))))
+            .add_systems(PostUpdate, guest_coat)
             .add_observer(on_scene_ready);
     }
 }
@@ -302,6 +303,7 @@ fn attach_visuals(
     tuning: Res<Tuning>,
     gltfs: Res<Assets<Gltf>>,
     new: Query<(Entity, &Body, Option<&Player>, Option<&Boss>, Option<&Enemy>), (With<SimEntity>, Without<Interp>)>,
+    local: Res<crate::net::LocalId>,
 ) {
     for (e, body, player, boss, enemy) in &new {
         let (kind, handle, scale) = if let Some(b) = boss {
@@ -325,7 +327,7 @@ fn attach_visuals(
         if boss.is_some() || enemy.is_some() {
             ec.insert(TintFlash::default());
         }
-        if player.is_some_and(|p| p.id == 0) {
+        if player.is_some_and(|p| p.id == local.0) {
             ec.insert(LocalPlayer);
         }
         ec.with_child((
@@ -506,13 +508,14 @@ fn drive_player_anims(
     clock: Res<super::AnimClock>,
     tuning: Res<Tuning>,
     models: Res<Models>,
-    mut q: Query<(&Player, &Action, &Body, &PrevBody, &Hitstop, &mut AnimDriver)>,
+    mut q: Query<(&Player, &Action, &Body, &PrevBody, &Hitstop, &mut AnimDriver, Has<LocalPlayer>)>,
     mut players: Query<&mut AnimationPlayer>,
+    net: Res<crate::net::Net>,
 ) {
     let t = &*tuning;
     let anims = &models.player;
     let dt = clock.dt;
-    for (p, action, body, prev, hitstop, mut drv) in &mut q {
+    for (p, action, body, prev, hitstop, mut drv, local) in &mut q {
         let weapon = WEAPON_MODELS[p.weapon as usize % WEAPON_MODELS.len()];
         let over = if hitstop.0 > 0 { 0.0 } else { clock.over };
         let speed = math::flat_len(body.pos - prev.pos) * 60.0;
@@ -544,6 +547,8 @@ fn drive_player_anims(
                     (("guard").into(), loop_time(&mut drv, anims, "guard", dt, 1.0))
                 }
             }
+            // Looking for a co-op partner: arms raised to the sky.
+            PState::Free if local && net.searching() => ("summon".into(), loop_time(&mut drv, anims, "summon", dt, 1.0)),
             PState::Free if p.airborne => {
                 let frames = anims.markers.get("jump").map_or(1.0, |m| m.frames);
                 ("jump".into(), ((p.air_ticks as f32 + over) / 60.0).min(frames / 60.0))
@@ -710,6 +715,57 @@ fn weapon_glow(
             Vec4::ZERO
         };
         set_tint(&mut commands, e, tint, &children, &mut meshes, &mut materials);
+    }
+}
+
+/// Co-op: the guests' coat is a light blue (the host's red with its red and blue swapped, then
+/// brightened; grain kept).
+/// Runs once the glTF materials have been converted (`ps1::swap_standard_materials`); the dyed
+/// copy becomes the mesh's base material, the one tints come back to.
+fn guest_coat(
+    mut q: Query<(Entity, &GltfMaterialName, &mut MeshMaterial3d<Ps1Material>, &mut Ps1Swapped), Added<Ps1Swapped>>,
+    parents: Query<&ChildOf>,
+    scenes: Query<&VisualScene>,
+    owners: Query<&Player>,
+    mut materials: ResMut<Assets<Ps1Material>>,
+    mut images: ResMut<Assets<Image>>,
+    mut dyed: Local<HashMap<AssetId<Ps1Material>, Handle<Ps1Material>>>,
+) {
+    for (e, name, mut mat, mut base) in &mut q {
+        if !matches!(name.0.as_str(), "coat" | "coat_dark") {
+            continue;
+        }
+        let guest = parents
+            .iter_ancestors(e)
+            .find_map(|a| scenes.get(a).ok())
+            .is_some_and(|vs| vs.kind == VisualKind::Player && owners.get(vs.owner).is_ok_and(|p| p.id != 0));
+        if !guest {
+            continue;
+        }
+        let handle = match dyed.get(&base.0.id()) {
+            Some(h) => h.clone(),
+            None => {
+                let Some(mut m) = materials.get(&base.0).cloned() else { continue };
+                let c = m.params.base_color;
+                m.params.base_color = Vec4::new(c.z, c.y, c.x, c.w);
+                if let Some(tex) = m.texture.as_ref().and_then(|t| images.get(t))
+                    && tex.texture_descriptor.format.block_copy_size(None) == Some(4)
+                    && let Some(data) = tex.data.as_ref()
+                {
+                    let mut copy = tex.clone();
+                    let lift = |v: u8, k: f32| (v as f32 * k).min(255.0) as u8;
+                    copy.data = Some(
+                        data.chunks_exact(4).flat_map(|p| [lift(p[2], 2.7), lift(p[1], 3.6), lift(p[0], 1.9), p[3]]).collect(),
+                    );
+                    m.texture = Some(images.add(copy));
+                }
+                let h = materials.add(m);
+                dyed.insert(base.0.id(), h.clone());
+                h
+            }
+        };
+        mat.0 = handle.clone();
+        base.0 = handle;
     }
 }
 

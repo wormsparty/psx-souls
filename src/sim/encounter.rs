@@ -9,11 +9,12 @@ use serde::{Deserialize, Serialize};
 
 use super::boss::Boss;
 use super::data::{BossMove, MoveRef, Tuning};
-use super::fighter::{Action, Body, Health};
+use super::fighter::{Action, Body, Foe, Health, Hitstop, PrevBody};
+use super::input::{MAX_PLAYERS, PlayerInputs};
 use super::items::{Inventory, Item, Loot};
 use super::player::{PState, Player};
 use super::world::{self, Zone};
-use super::{ResetFight, SimEvent, SimEvents, math};
+use super::{ResetFight, SimEvent, SimEvents, SimIds, math, sim_order};
 
 #[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Encounter {
@@ -71,8 +72,9 @@ pub struct Progress {
     pub picked: u64,
     /// Defeated unique enemies (bit i: `level.enemies[i]`).
     pub slain: u64,
-    /// Start in this arena, in front of its bosses (debug: `SOULS_BOSS`). Never saved.
-    #[serde(skip)]
+    /// Start in this arena, in front of its bosses (debug: `SOULS_BOSS`). Never saved (a
+    /// player's progress never has it), but sent to the co-op guests with the host's world.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arena: Option<u8>,
 }
 
@@ -225,31 +227,76 @@ pub fn near_torch(t: &Tuning, pos: Vec3) -> Option<u8> {
 }
 
 
+/// Gets a fallen player back up (co-op), rested: full health, flasks refilled, at `pos`.
+#[allow(clippy::too_many_arguments)]
+fn revive(t: &Tuning, p: &mut Player, body: &mut Body, prev: &mut PrevBody, action: &mut Action, hp: &mut Health, stop: &mut Hitstop, (pos, yaw): (Vec3, f32), zone: Zone) {
+    let mut inventory = p.inventory.clone();
+    inventory.refill(t);
+    *p = Player {
+        weapon: p.weapon,
+        inventory,
+        checkpoint: p.checkpoint,
+        found: p.found,
+        picked: p.picked,
+        slain: p.slain,
+        cmd_seq: p.cmd_seq,
+        zone,
+        ..Player::new(p.id, t)
+    };
+    body.pos = pos;
+    body.yaw = yaw;
+    *prev = PrevBody { pos, yaw };
+    action.stop();
+    hp.cur = hp.max;
+    stop.0 = 0;
+}
+
+type PlayerParts = (Entity, &'static mut Player, &'static mut Body, &'static mut PrevBody, &'static mut Health, &'static mut Action, &'static mut Hitstop);
+
 /// Bosses waiting in the arena a player went into; the fight starts at once (the fog closes
 /// behind them); victory; the arena empties once everyone has left it; respawn.
-#[allow(clippy::type_complexity)]
+///
+/// Co-op (as in the souls' co-op mods): a fallen player gets back up alone at their checkpoint
+/// while the others fight on — except in a boss fight, where they wait for its outcome (revived
+/// in the arena on victory). Everyone down: back to the checkpoint, the world starts over.
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn encounter_tick(
     mut commands: Commands,
     tuning: Res<Tuning>,
     mut enc: ResMut<Encounter>,
     mut reset: ResMut<ResetFight>,
     mut events: ResMut<SimEvents>,
-    mut players: Query<(Entity, &mut Player, &Body, &mut Health), Without<Boss>>,
-    mut bosses: Query<(Entity, &Boss, &mut Action, &mut Health)>,
+    ids: SimIds,
+    mut players: Query<PlayerParts, Without<Boss>>,
+    mut bosses: Query<(Entity, &Boss, &mut Action, &mut Health), Without<Player>>,
 ) {
     let t = &*tuning;
-    for (_, mut p, _, _) in &mut players {
+    let order = sim_order(&ids);
+    for (_, mut p, ..) in &mut players {
         p.dead_ticks = if p.state == PState::Dead { p.dead_ticks + 1 } else { 0 };
     }
 
     // Everyone is dead: back to the checkpoint, the boss starts over.
+    let everyone_down = players.iter().all(|(_, p, ..)| p.state == PState::Dead);
     let all_dead = players.iter().all(|(_, p, ..)| p.state == PState::Dead && p.dead_ticks >= RESPAWN_TICKS);
     if all_dead
         && !reset.requested
-        && let Some((_, p, b, h)) = players.iter().min_by_key(|(_, p, ..)| p.id)
+        && let Some((_, p, b, _, h, ..)) = players.iter().min_by_key(|(_, p, ..)| p.id)
     {
         reset.requested = true;
         reset.progress = Some(Progress::of_player(p, b, h, &enc, t));
+    }
+    // Co-op: fallen alone, outside a boss fight: back at their checkpoint.
+    if !everyone_down {
+        let mut it = players.iter_many_mut(&order);
+        while let Some((e, mut p, mut b, mut prev, mut h, mut a, mut stop)) = it.fetch_next() {
+            let fighting = matches!(p.zone, Zone::Arena(i) if enc.active && enc.arena == Some(i));
+            if p.state == PState::Dead && p.dead_ticks >= RESPAWN_TICKS && !fighting {
+                let at = checkpoint_spawn(t, p.checkpoint as usize);
+                revive(t, &mut p, &mut b, &mut prev, &mut a, &mut h, &mut stop, at, Zone::Level);
+                events.push(SimEvent::Revived { entity: e });
+            }
+        }
     }
     let alive_in = |p: &Player, h: &Health| match p.zone {
         Zone::Arena(i) if !h.dead() => Some(i),
@@ -257,14 +304,14 @@ pub fn encounter_tick(
     };
 
     // A player went through a fog: its bosses are there (created at the next tick).
-    if let Some(i) = players.iter().find_map(|(_, p, _, h)| alive_in(&p, &h))
+    if let Some(i) = players.iter_many(&order).find_map(|(_, p, _, _, h, ..)| alive_in(p, h))
         && enc.arena != Some(i)
         && !enc.is_defeated(i)
     {
         for (e, ..) in &bosses {
             commands.entity(e).despawn();
         }
-        super::spawn_boss(&mut commands, t, i);
+        super::spawn_boss(&mut commands, t, i, players.iter().count());
         enc.arena = Some(i);
         enc.active = false;
         return;
@@ -274,7 +321,7 @@ pub fn encounter_tick(
     let boss_alive = bosses.iter().any(|(_, b, _, h)| !h.dead() && !b.def(t).minor);
 
     // The bosses wake up roaring, the fog closes again.
-    if !enc.active && boss_alive && players.iter().any(|(_, p, _, h)| alive_in(&p, &h) == Some(arena)) {
+    if !enc.active && boss_alive && players.iter().any(|(_, p, _, _, h, ..)| alive_in(p, h) == Some(arena)) {
         enc.active = true;
         for (_, b, mut a, h) in &mut bosses {
             if !h.dead() && a.mv.is_none() {
@@ -295,12 +342,17 @@ pub fn encounter_tick(
             }
         }
         events.push(SimEvent::BossDefeated);
-        // The survivors catch their breath: full health and flasks refilled.
-        for (e, mut p, _, mut h) in &mut players {
+        // The survivors catch their breath: full health and flasks refilled. The fallen
+        // (co-op) get back up at the arena's door.
+        let mut it = players.iter_many_mut(&order);
+        while let Some((e, mut p, mut b, mut prev, mut h, mut a, mut stop)) = it.fetch_next() {
             if !h.dead() {
                 h.cur = h.max;
                 p.inventory.refill(t);
                 events.push(SimEvent::Heal { entity: e });
+            } else if p.zone == Zone::Arena(arena) && !p.falling {
+                revive(t, &mut p, &mut b, &mut prev, &mut a, &mut h, &mut stop, door_entry(t, arena as usize), Zone::Arena(arena));
+                events.push(SimEvent::Revived { entity: e });
             }
         }
         if door_open(t, enc.defeated) {
@@ -317,46 +369,111 @@ pub fn encounter_tick(
     }
 }
 
-/// Actions decided in the menus. Over the network, they'll travel with the inputs.
+/// Actions decided in the menus. Over the network, they travel with the inputs
+/// (`PlayerInput::cmd`, see `encode`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SimCommand {
     Equip { player: u8, slot: u8, item: Option<Item> },
     EquipTalisman { player: u8, item: Option<Item> },
     /// Brings back a defeated boss (rekindling its torch): it awaits again in its arena.
     ReviveBoss(u8),
-    /// Travel to a discovered checkpoint: you respawn there rested, the world is reset.
+    /// Travel to a discovered checkpoint: you respawn there rested, the world is reset (in
+    /// co-op, the whole party travels).
     Travel { player: u8, checkpoint: u8 },
+    /// Co-op: the player left the game (or lost the connection), their character vanishes.
+    Leave { player: u8 },
+}
+
+const CMD_EQUIP: u8 = 1;
+const CMD_TALISMAN: u8 = 2;
+const CMD_REVIVE: u8 = 3;
+const CMD_TRAVEL: u8 = 4;
+const CMD_LEAVE: u8 = 5;
+const NO_ITEM: u8 = u8::MAX;
+
+fn item_code(item: Option<Item>) -> u8 {
+    item.and_then(|it| Item::ALL.iter().position(|x| *x == it)).map_or(NO_ITEM, |i| i as u8)
+}
+
+fn item_of(code: u8) -> Option<Item> {
+    Item::ALL.get(code as usize).copied()
+}
+
+impl SimCommand {
+    /// Encoding in a `PlayerInput` (`cmd`): number `seq` (never 0), kind, arguments. The player
+    /// is the one whose input carries it.
+    pub fn encode(self, seq: u8) -> [u8; 4] {
+        let (kind, a, b) = match self {
+            SimCommand::Equip { slot, item, .. } => (CMD_EQUIP, slot, item_code(item)),
+            SimCommand::EquipTalisman { item, .. } => (CMD_TALISMAN, item_code(item), 0),
+            SimCommand::ReviveBoss(i) => (CMD_REVIVE, i, 0),
+            SimCommand::Travel { checkpoint, .. } => (CMD_TRAVEL, checkpoint, 0),
+            SimCommand::Leave { .. } => (CMD_LEAVE, 0, 0),
+        };
+        [seq.max(1), kind, a, b]
+    }
+
+    pub fn decode(player: u8, raw: [u8; 4]) -> Option<Self> {
+        let [_, kind, a, b] = raw;
+        Some(match kind {
+            CMD_EQUIP => SimCommand::Equip { player, slot: a, item: item_of(b) },
+            CMD_TALISMAN => SimCommand::EquipTalisman { player, item: item_of(a) },
+            CMD_REVIVE => SimCommand::ReviveBoss(a),
+            CMD_TRAVEL => SimCommand::Travel { player, checkpoint: a },
+            CMD_LEAVE => SimCommand::Leave { player },
+            _ => return None,
+        })
+    }
 }
 
 #[derive(Resource, Default, Debug)]
 pub struct SimCommands(pub Vec<SimCommand>);
 
+/// The menu decisions carried by the inputs (co-op): each one is queued once, in player order.
+pub fn input_commands(inputs: Res<PlayerInputs>, ids: SimIds, mut players: Query<&mut Player>, mut queue: ResMut<SimCommands>) {
+    let order = sim_order(&ids);
+    let mut it = players.iter_many_mut(&order);
+    while let Some(mut p) = it.fetch_next() {
+        let raw = inputs.0[p.id as usize % MAX_PLAYERS].cmd;
+        if raw[0] == 0 || raw[0] == p.cmd_seq {
+            continue;
+        }
+        p.cmd_seq = raw[0];
+        if let Some(c) = SimCommand::decode(p.id, raw) {
+            queue.0.push(c);
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn apply_commands(
+    mut commands: Commands,
     tuning: Res<Tuning>,
     mut queue: ResMut<SimCommands>,
     mut enc: ResMut<Encounter>,
     mut events: ResMut<SimEvents>,
     mut reset: ResMut<ResetFight>,
-    mut players: Query<(&mut Player, &Body, &Health)>,
+    mut players: Query<(Entity, &mut Player, &Body, &Health), Without<Foe>>,
+    mut foes: Query<(&mut Health, Option<&Boss>), With<Foe>>,
 ) {
     for c in std::mem::take(&mut queue.0) {
         match c {
             SimCommand::Equip { player, slot, item } => {
-                for (mut p, ..) in &mut players {
+                for (_, mut p, ..) in &mut players {
                     if p.id == player {
                         p.inventory.equip(slot as usize, item);
                     }
                 }
             }
             SimCommand::EquipTalisman { player, item } => {
-                for (mut p, ..) in &mut players {
+                for (_, mut p, ..) in &mut players {
                     if p.id == player {
                         p.inventory.equip_talisman(item);
                     }
                 }
             }
             SimCommand::Travel { player, checkpoint } => {
-                let Some((p, b, h)) = players.iter().find(|(p, ..)| p.id == player) else { continue };
+                let Some((_, p, ..)) = players.iter().find(|(_, p, ..)| p.id == player) else { continue };
                 if enc.active
                     || p.zone != Zone::Level
                     || p.found & (1u32 << checkpoint) == 0
@@ -364,13 +481,32 @@ pub fn apply_commands(
                 {
                     continue;
                 }
-                let mut progress = Progress::of_player(p, b, h, &enc, &tuning);
-                progress.checkpoint = checkpoint;
-                progress.pos = None;
-                progress.hp = None;
-                progress.inventory.refill(&tuning);
+                // The whole party travels, rested: the world (the first player's) and each
+                // one's character.
+                let mut party: Vec<(u8, Progress)> = players.iter().map(|(_, p, b, h)| (p.id, Progress::of_player(p, b, h, &enc, &tuning))).collect();
+                party.sort_by_key(|x| x.0);
+                let mut party: Vec<Progress> = party.into_iter().map(|x| x.1).collect();
+                for pr in &mut party {
+                    pr.checkpoint = checkpoint;
+                    pr.pos = None;
+                    pr.hp = None;
+                    pr.inventory.refill(&tuning);
+                }
                 reset.requested = true;
-                reset.progress = Some(progress);
+                reset.progress = Some(party.remove(0));
+                reset.guests = party;
+            }
+            SimCommand::Leave { player } => {
+                let Some(e) = players.iter().find(|(_, p, ..)| p.id == player).map(|x| x.0) else { continue };
+                commands.entity(e).despawn();
+                // One fewer: the opponents go back to the health of a smaller party.
+                let n = players.iter().count();
+                for (mut h, boss) in &mut foes {
+                    let lead = boss.is_some_and(|b| !b.def(&tuning).minor);
+                    let k = super::fighter::party_hp(n - 1, lead) / super::fighter::party_hp(n, lead);
+                    h.max *= k;
+                    h.cur *= k;
+                }
             }
             SimCommand::ReviveBoss(i) => {
                 if enc.is_defeated(i) && enc.arena != Some(i) {

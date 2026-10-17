@@ -28,6 +28,17 @@ pub struct Health {
     pub max: f32,
 }
 
+/// Co-op: opponents' health, per extra player — +30% for path enemies (and a boss's supporting
+/// roles, the butcher's dogs), +100% for the bosses.
+pub const PARTY_ENEMY_HP: f32 = 0.3;
+pub const PARTY_BOSS_HP: f32 = 1.0;
+
+/// Health multiplier of an opponent facing `players` players (`boss`: a lead boss).
+pub fn party_hp(players: usize, boss: bool) -> f32 {
+    let per = if boss { PARTY_BOSS_HP } else { PARTY_ENEMY_HP };
+    1.0 + per * players.saturating_sub(1) as f32
+}
+
 impl Health {
     pub fn new(max: f32) -> Self {
         Self { cur: max, max }

@@ -9,7 +9,7 @@ use super::data::{Cast, CastAim, Reaction, SpellKind, Tuning};
 use super::fighter::{Action, Body, Health, Hitstop};
 use super::player::{PState, Player};
 use super::rng::SimRng;
-use super::{DT, SimEntity, SimEvent, SimEvents, SimTick, math, world};
+use super::{DT, SimEntity, SimEvent, SimEvents, SimIds, SimTick, math, sim_order, world};
 
 #[derive(Component, Clone, Debug)]
 pub struct Spell {
@@ -197,7 +197,7 @@ pub fn cast(
 }
 
 /// Advances the spells and hits the players.
-#[allow(clippy::type_complexity)]
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn spell_tick(
     mut commands: Commands,
     tuning: Res<Tuning>,
@@ -206,10 +206,13 @@ pub fn spell_tick(
     mut spells: Query<(Entity, &mut Spell)>,
     mut players: Query<(Entity, &mut Player, &Body, &mut Health, &mut Action, &mut Hitstop), Without<Boss>>,
     casters: Query<(&Body, &Action, &Health), (With<Boss>, Without<Player>)>,
+    ids: SimIds,
 ) {
     let t = &*tuning;
     let now = tick.0;
-    for (e, mut s) in &mut spells {
+    let order = sim_order(&ids);
+    let mut spell_it = spells.iter_many_mut(&order);
+    while let Some((e, mut s)) = spell_it.fetch_next() {
         let sd = s.def(t).clone();
         s.age += 1;
         s.prev = s.pos;
@@ -225,7 +228,8 @@ pub fn spell_tick(
                     }
                     let r = splash_radius(&sd);
                     let blow = Blow { damage: sd.damage * SPLASH_DAMAGE, reaction: Reaction::Light, aoe: true, ..blow };
-                    for (pe, mut p, pbody, mut php, mut pact, mut pstop) in &mut players {
+                    let mut pit = players.iter_many_mut(&order);
+                    while let Some((pe, mut p, pbody, mut php, mut pact, mut pstop)) = pit.fetch_next() {
                         if s.struck.contains(&pe) || !targetable(&p, &php) || p.volley == s.volley {
                             continue;
                         }
@@ -233,7 +237,7 @@ pub fn spell_tick(
                             continue;
                         }
                         let pos = pbody.pos + Vec3::Y * 0.5;
-                        if strike_player(t, now, s.pos, &blow, &mut p, &mut pact, &mut php, &mut pstop, pbody, pos, &mut events) != Struck::Dodged {
+                        if strike_player(t, now, s.pos, &blow, &mut p, &mut pact, &mut php, &mut pstop, pbody, pos, pe, &mut events) != Struck::Dodged {
                             p.volley = s.volley;
                             s.struck.push(pe);
                         }
@@ -285,7 +289,8 @@ pub fn spell_tick(
                 s.pos += step;
                 let (a, b) = (s.prev, s.pos);
                 let mut gone = false;
-                for (_, mut p, pbody, mut php, mut pact, mut pstop) in &mut players {
+                let mut pit = players.iter_many_mut(&order);
+                while let Some((pe, mut p, pbody, mut php, mut pact, mut pstop)) = pit.fetch_next() {
                     if !targetable(&p, &php) || p.volley == s.volley {
                         continue;
                     }
@@ -295,7 +300,7 @@ pub fn spell_tick(
                         continue;
                     }
                     let pos = s.pos;
-                    if strike_player(t, now, s.prev, &blow, &mut p, &mut pact, &mut php, &mut pstop, pbody, pos, &mut events) != Struck::Dodged {
+                    if strike_player(t, now, s.prev, &blow, &mut p, &mut pact, &mut php, &mut pstop, pbody, pos, pe, &mut events) != Struck::Dodged {
                         p.volley = s.volley;
                         gone = true;
                         break;
@@ -317,7 +322,8 @@ pub fn spell_tick(
                 };
                 let (a, b) = beam_ends(cb, s.from, s.reach);
                 (s.pos, s.end) = (a, b);
-                for (pe, mut p, pbody, mut php, mut pact, mut pstop) in &mut players {
+                let mut pit = players.iter_many_mut(&order);
+                while let Some((pe, mut p, pbody, mut php, mut pact, mut pstop)) = pit.fetch_next() {
                     if s.struck.contains(&pe) || !targetable(&p, &php) || p.volley == s.volley {
                         continue;
                     }
@@ -327,7 +333,7 @@ pub fn spell_tick(
                         continue;
                     }
                     let pos = pbody.pos + Vec3::Y * 1.0;
-                    if strike_player(t, now, a, &blow, &mut p, &mut pact, &mut php, &mut pstop, pbody, pos, &mut events) != Struck::Dodged {
+                    if strike_player(t, now, a, &blow, &mut p, &mut pact, &mut php, &mut pstop, pbody, pos, pe, &mut events) != Struck::Dodged {
                         p.volley = s.volley;
                         s.struck.push(pe);
                     }
@@ -345,7 +351,8 @@ pub fn spell_tick(
                 if s.age < burst {
                     continue;
                 }
-                for (pe, mut p, pbody, mut php, mut pact, mut pstop) in &mut players {
+                let mut pit = players.iter_many_mut(&order);
+                while let Some((pe, mut p, pbody, mut php, mut pact, mut pstop)) = pit.fetch_next() {
                     if s.struck.contains(&pe) || !targetable(&p, &php) || p.volley == s.volley {
                         continue;
                     }
@@ -353,7 +360,7 @@ pub fn spell_tick(
                         continue;
                     }
                     let pos = pbody.pos + Vec3::Y * 1.0;
-                    if strike_player(t, now, s.pos, &blow, &mut p, &mut pact, &mut php, &mut pstop, pbody, pos, &mut events) != Struck::Dodged {
+                    if strike_player(t, now, s.pos, &blow, &mut p, &mut pact, &mut php, &mut pstop, pbody, pos, pe, &mut events) != Struck::Dodged {
                         p.volley = s.volley;
                         s.struck.push(pe);
                     }
