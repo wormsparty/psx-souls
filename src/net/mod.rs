@@ -22,6 +22,8 @@
 //!
 //! In co-op the game never pauses: an open menu only stops the local player's inputs.
 
+#[cfg(target_arch = "wasm32")]
+mod awake;
 pub mod socket;
 
 use std::collections::VecDeque;
@@ -337,6 +339,8 @@ impl Plugin for NetPlugin {
             .add_systems(OnEnter(AppState::Title), |w: &mut World| leave(w, None));
         #[cfg(not(target_arch = "wasm32"))]
         app.add_systems(OnEnter(AppState::Playing), auto_coop);
+        #[cfg(target_arch = "wasm32")]
+        app.add_systems(Startup, awake::install).add_systems(PreUpdate, awake::follow);
     }
 }
 

@@ -42,7 +42,7 @@ getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
 ggrs = { version = "0.13", features = ["sync-send", "wasm-bindgen"] }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
-web-sys = { version = "0.3", features = ["Window", "Storage", "Document", "Element", "Location", "EventTarget", "MouseEvent"] }
+web-sys = { version = "0.3", features = ["Window", "Storage", "Document", "Element", "Location", "EventTarget", "MouseEvent", "Worker", "Blob", "BlobPropertyBag", "Url"] }
 
 [features]
 # `cargo run --features dev`: hot reload of assets/configs and dynamic linking (native only).
