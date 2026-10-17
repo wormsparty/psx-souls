@@ -412,9 +412,35 @@ fn sync_pointer_lock(
     }
 }
 
+/// Movement (pixels) above which a single event can't be a real one.
+const OFFSET_MIN: f32 = 100.0;
+
+/// Firefox under Wayland mixes two streams in `mousemove` under pointer lock: the real
+/// movement, and events whose "movement" is the hidden cursor's offset from the lock point
+/// (computed as on X11, where the cursor is recentred after each event; on Wayland it never
+/// is, so the offset keeps growing, up to the edge of the screen). An offset event lies near
+/// the previous one, a real one near zero: the offsets are recognised and dropped.
+#[derive(Default)]
+pub struct MouseFilter {
+    /// Last offset seen.
+    offset: Option<Vec2>,
+}
+
+impl MouseFilter {
+    /// The real movement of the event, `None` if it's an offset.
+    pub fn accept(&mut self, d: Vec2) -> Option<Vec2> {
+        let on_track = self.offset.is_some_and(|o| d.distance(o) < d.length());
+        if on_track || d.length() > OFFSET_MIN {
+            self.offset = Some(d);
+            return None;
+        }
+        Some(d)
+    }
+}
+
 /// Web: winit rebuilds the mouse delta from the positions of Firefox's coalesced events, which
-/// are inconsistent under pointer lock (jumps, the camera spins for a slow movement).
-/// Read `movementX/Y` straight from the browser instead.
+/// are inconsistent under pointer lock. Read `movementX/Y` straight from the browser instead,
+/// filtered on Firefox (`MouseFilter`).
 #[cfg(target_arch = "wasm32")]
 mod web_mouse {
     use std::cell::Cell;
@@ -424,16 +450,22 @@ mod web_mouse {
     use wasm_bindgen::JsCast;
     use wasm_bindgen::closure::Closure;
 
+    use super::MouseFilter;
+
     thread_local! {
         static MOTION: Cell<Vec2> = const { Cell::new(Vec2::ZERO) };
     }
 
     pub fn listen() {
-        let Some(document) = web_sys::window().and_then(|w| w.document()) else { return };
+        let Some(window) = web_sys::window() else { return };
+        let Some(document) = window.document() else { return };
+        let firefox = window.navigator().user_agent().is_ok_and(|ua| ua.contains("Firefox/"));
+        let mut filter = firefox.then(MouseFilter::default);
         let doc = document.clone();
         let on_move = Closure::<dyn FnMut(web_sys::MouseEvent)>::new(move |e: web_sys::MouseEvent| {
             if doc.pointer_lock_element().is_some() {
                 let d = Vec2::new(e.movement_x() as f32, e.movement_y() as f32);
+                let Some(d) = filter.as_mut().map_or(Some(d), |f| f.accept(d)) else { return };
                 MOTION.with(|m| m.set(m.get() + d));
             }
         });
@@ -443,5 +475,37 @@ mod web_mouse {
 
     pub fn replace_motion(mut motion: ResMut<AccumulatedMouseMotion>) {
         motion.delta = MOTION.with(|m| m.replace(Vec2::ZERO));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run(events: &[(f32, f32)]) -> Vec2 {
+        let mut f = MouseFilter::default();
+        events.iter().filter_map(|&(x, y)| f.accept(Vec2::new(x, y))).sum()
+    }
+
+    /// Excerpts of a Firefox/Wayland log: real movement interleaved with the cursor's offset.
+    #[test]
+    fn drops_firefox_offsets() {
+        let left = [(-4., 0.), (-455., -124.), (-5., 1.), (-461., -123.), (-5., 1.), (-466., -121.)];
+        assert_eq!(run(&left), Vec2::new(-14., 2.));
+        // The offset left over from the previous lock, then only offsets (tiny real movement).
+        let right = [(63., -1.), (-823., 594.), (15., 0.), (-808., 593.), (15., 0.), (-792., 593.)];
+        assert_eq!(run(&right), Vec2::new(93., -1.));
+        let only_offsets = [(106., 391.), (107., 391.), (108., 390.), (109., 390.)];
+        assert_eq!(run(&only_offsets), Vec2::ZERO);
+        // The offset crosses the lock point horizontally (x near 0, y large).
+        let crossing = [(3., 0.), (-7., 386.), (4., 0.), (-2., 386.), (3., 0.), (2., 386.)];
+        assert_eq!(run(&crossing), Vec2::new(10., 0.));
+    }
+
+    /// Without offsets (Chrome, X11), a fast movement goes through untouched.
+    #[test]
+    fn keeps_real_movement() {
+        let flick = [(5., 0.), (20., -2.), (45., -3.), (70., -4.), (60., -2.), (30., 0.), (8., 0.)];
+        assert_eq!(run(&flick), Vec2::new(238., -11.));
     }
 }
