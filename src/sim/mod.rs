@@ -313,7 +313,7 @@ pub fn spawn_fight(commands: &mut Commands, t: &Tuning, players: u8, progress: &
         // A saved position off the ground (modified level): at the checkpoint.
         // At the foot of a brazier (we quit while resting there): at the usual spot, facing
         // the way forward rather than the fire.
-        let saved = progress.pos.and_then(|[x, z, yaw]| {
+        let saved = progress.pos.filter(|v| v.iter().all(|c| c.is_finite())).and_then(|[x, z, yaw]| {
             let y = world::floor_at(t, x, z, 0.0)?;
             let pos = Vec3::new(x, y, z);
             match encounter::near_checkpoint(t, pos) {

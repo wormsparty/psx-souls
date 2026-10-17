@@ -32,7 +32,7 @@ pub struct Encounter {
 
 impl Encounter {
     pub fn is_defeated(&self, i: u8) -> bool {
-        self.defeated & (1u32 << i) != 0
+        1u32.checked_shl(i.into()).is_some_and(|b| self.defeated & b != 0)
     }
 }
 
@@ -483,8 +483,8 @@ pub fn apply_commands(
                 let Some((_, p, ..)) = players.iter().find(|(_, p, ..)| p.id == player) else { continue };
                 if enc.active
                     || p.zone != Zone::Level
-                    || p.found & (1u32 << checkpoint) == 0
                     || checkpoint as usize >= tuning.level.checkpoints.len()
+                    || p.found & (1u32 << checkpoint) == 0
                 {
                     continue;
                 }

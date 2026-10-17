@@ -219,7 +219,7 @@ impl Inventory {
     /// Quantity restored on rest and on death (`None`: the item doesn't refill).
     pub fn refill_amount(&self, item: Item, t: &Tuning) -> Option<u8> {
         match item {
-            Item::HealFlask => Some(t.player.heal_charges + self.flask_bonus),
+            Item::HealFlask => Some(t.player.heal_charges.saturating_add(self.flask_bonus)),
             _ => None,
         }
     }

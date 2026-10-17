@@ -392,6 +392,42 @@ fn the_whole_party_travels_together() {
     assert_eq!(player(&mut app, 1).1.weapon, 1);
 }
 
+/// What a peer sends can't crash the others: absurd characters, worlds and menu decisions.
+#[test]
+fn a_hostile_peer_cannot_crash_the_game() {
+    let t = Tuning::builtin();
+    let mut host = Progress::new_game(&t);
+    host.checkpoint = u8::MAX;
+    host.arena = Some(u8::MAX);
+    host.defeated = u32::MAX;
+    host.pos = Some([f32::INFINITY, f32::MAX, f32::INFINITY]);
+    let mut guest = Progress::new_game(&t);
+    guest.weapon = u8::MAX;
+    guest.hp = Some(f32::INFINITY);
+    guest.pos = Some([0.0, 0.0, f32::INFINITY]);
+    guest.inventory.active = u8::MAX;
+    guest.inventory.flask_bonus = u8::MAX;
+    let mut app = party(2, host);
+    app.world_mut().resource_mut::<ResetFight>().guests = vec![guest];
+    idle(&mut app, 1);
+    let cmds = [
+        SimCommand::ReviveBoss(u8::MAX),
+        SimCommand::Travel { player: 1, checkpoint: u8::MAX },
+        SimCommand::Equip { player: 1, slot: u8::MAX, item: None },
+    ];
+    for (i, c) in cmds.into_iter().enumerate() {
+        step(&mut app, &[PlayerInput::default(), PlayerInput { cmd: c.encode(i as u8 + 1), ..default() }]);
+    }
+    // Unknown kinds and items.
+    step(&mut app, &[PlayerInput::default(), PlayerInput { cmd: [9, u8::MAX, u8::MAX, u8::MAX], ..default() }]);
+    step(&mut app, &[PlayerInput::default(), PlayerInput { cmd: [10, 1, 0, 200], ..default() }]);
+    kill(&mut app, 1);
+    idle(&mut app, RESPAWN_TICKS + 10);
+    let (_, p1, b1, h1) = player(&mut app, 1);
+    assert!((p1.weapon as usize) < t.weapons.len());
+    assert!(b1.pos.is_finite() && b1.yaw.is_finite() && h1.cur.is_finite());
+}
+
 #[test]
 fn the_state_hash_is_the_same_on_32_and_64_bits() {
     assert_eq!(stable_hash(&5usize), stable_hash(&5u64));
