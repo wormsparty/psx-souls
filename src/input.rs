@@ -59,7 +59,9 @@ impl Plugin for InputPlugin {
             )
             .add_systems(Update, (grab_cursor, read_look));
         #[cfg(target_arch = "wasm32")]
-        app.add_systems(Update, sync_pointer_lock.before(grab_cursor));
+        app.add_systems(Startup, web_mouse::listen)
+            .add_systems(PreUpdate, web_mouse::replace_motion.after(bevy::input::InputSystems).before(triggers_from_axes))
+            .add_systems(Update, sync_pointer_lock.before(grab_cursor));
     }
 }
 
@@ -407,5 +409,39 @@ fn sync_pointer_lock(
         *unlocked = 0.0;
         cursor.grab_mode = CursorGrabMode::None;
         cursor.visible = true;
+    }
+}
+
+/// Web: winit rebuilds the mouse delta from the positions of Firefox's coalesced events, which
+/// are inconsistent under pointer lock (jumps, the camera spins for a slow movement).
+/// Read `movementX/Y` straight from the browser instead.
+#[cfg(target_arch = "wasm32")]
+mod web_mouse {
+    use std::cell::Cell;
+
+    use bevy::input::mouse::AccumulatedMouseMotion;
+    use bevy::prelude::*;
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen::closure::Closure;
+
+    thread_local! {
+        static MOTION: Cell<Vec2> = const { Cell::new(Vec2::ZERO) };
+    }
+
+    pub fn listen() {
+        let Some(document) = web_sys::window().and_then(|w| w.document()) else { return };
+        let doc = document.clone();
+        let on_move = Closure::<dyn FnMut(web_sys::MouseEvent)>::new(move |e: web_sys::MouseEvent| {
+            if doc.pointer_lock_element().is_some() {
+                let d = Vec2::new(e.movement_x() as f32, e.movement_y() as f32);
+                MOTION.with(|m| m.set(m.get() + d));
+            }
+        });
+        let _ = document.add_event_listener_with_callback("mousemove", on_move.as_ref().unchecked_ref());
+        on_move.forget();
+    }
+
+    pub fn replace_motion(mut motion: ResMut<AccumulatedMouseMotion>) {
+        motion.delta = MOTION.with(|m| m.replace(Vec2::ZERO));
     }
 }

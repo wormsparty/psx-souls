@@ -5462,6 +5462,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.21",
+ "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
 ]
