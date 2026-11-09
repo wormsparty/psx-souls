@@ -136,11 +136,11 @@
   ]
  },
  "guard_walk": {
-  "frames": 64.0,
+  "frames": 52.0,
   "loop": true,
   "marks": [
    0,
-   64.0
+   52.0
   ]
  },
  "heal": {
@@ -304,19 +304,19 @@
   ]
  },
  "run": {
-  "frames": 40.0,
+  "frames": 36.0,
   "loop": true,
   "marks": [
    0,
-   40.0
+   36.0
   ]
  },
  "sprint": {
-  "frames": 30.0,
+  "frames": 28.0,
   "loop": true,
   "marks": [
    0,
-   30.0
+   28.0
   ]
  },
  "summon": {
@@ -336,11 +336,11 @@
   ]
  },
  "walk": {
-  "frames": 64.0,
+  "frames": 52.0,
   "loop": true,
   "marks": [
    0,
-   64.0
+   52.0
   ]
  }
 }

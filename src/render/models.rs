@@ -74,6 +74,9 @@ impl GameAssets {
 pub struct ModelAnims {
     pub graph: Handle<AnimationGraph>,
     pub nodes: HashMap<String, AnimationNodeIndex>,
+    /// A second node per clip: a clip can then fade into itself (a move started again) or
+    /// into the clip it has only just faded out of.
+    pub twins: HashMap<String, AnimationNodeIndex>,
     pub markers: HashMap<String, Marker>,
 }
 
@@ -116,7 +119,18 @@ pub struct AnimDriver {
     pub player: Option<Entity>,
     pub current: Option<String>,
     pub phase: f32,
+    /// Graph node being played, and the one it is fading out of (frozen where it was left).
+    pub node: Option<AnimationNodeIndex>,
+    pub from: Option<AnimationNodeIndex>,
+    /// Progress of that fade (0 → 1).
+    pub fade: f32,
+    /// Time last shown in the current clip: going back means the move started again.
+    pub time: f32,
 }
+
+/// Duration of the fade between two clips (seconds). The simulation never waits for it: a move
+/// starts on its tick, only the picture takes a few frames to leave the previous pose.
+const CLIP_FADE: f32 = 0.085;
 
 #[derive(Component)]
 pub struct WeaponVisual {
@@ -237,11 +251,18 @@ fn load_assets(mut commands: Commands, server: Res<AssetServer>) {
 
 fn build_anims(gltf: &Gltf, markers_json: &str, graphs: &mut Assets<AnimationGraph>) -> ModelAnims {
     let names: Vec<String> = gltf.named_animations.keys().map(|k| k.to_string()).collect();
-    let (graph, idx) =
-        AnimationGraph::from_clips(names.iter().map(|n| gltf.named_animations[n.as_str()].clone()));
+    let clips: Vec<Handle<AnimationClip>> = names.iter().map(|n| gltf.named_animations[n.as_str()].clone()).collect();
+    // Every clip twice: see `ModelAnims::twins`.
+    let (graph, idx) = AnimationGraph::from_clips(clips.iter().cloned().chain(clips.iter().cloned()));
     let markers: HashMap<String, Marker> =
         serde_json::from_str(markers_json).expect("marqueurs d'animation invalides");
-    ModelAnims { graph: graphs.add(graph), nodes: names.into_iter().zip(idx).collect(), markers }
+    let (first, second) = idx.split_at(names.len());
+    ModelAnims {
+        graph: graphs.add(graph),
+        nodes: names.iter().cloned().zip(first.iter().copied()).collect(),
+        twins: names.iter().cloned().zip(second.iter().copied()).collect(),
+        markers,
+    }
 }
 
 fn wait_for_assets(
@@ -471,26 +492,56 @@ fn action_time(def: &MoveDef, tick: f32, m: &Marker) -> f32 {
     frame.clamp(0.0, m.frames) / 60.0
 }
 
+/// Shows clip `name` at `time`. A change of clip (or the same move started again) is faded in
+/// over `CLIP_FADE` from the pose the model was in, instead of snapping to the new one.
 fn set_clip(
     drv: &mut AnimDriver,
     anims: &ModelAnims,
     players: &mut Query<&mut AnimationPlayer>,
     name: &str,
     time: f32,
+    dt: f32,
 ) {
     let Some(pe) = drv.player else { return };
     let Ok(mut ap) = players.get_mut(pe) else { return };
-    let Some(&node) = anims.nodes.get(name) else {
+    let (Some(&node), Some(&twin)) = (anims.nodes.get(name), anims.twins.get(name)) else {
         warn_once!("clip d'animation manquant : {name}");
         return;
     };
-    if drv.current.as_deref() != Some(name) {
+    let same = drv.current.as_deref() == Some(name);
+    let looping = anims.markers.get(name).is_some_and(|m| m.looping);
+    let restarted = same && !looping && time + 0.05 < drv.time;
+    if drv.current.is_none() {
+        // First clip of this model: nothing to fade from.
         ap.stop_all();
         ap.play(node).pause();
-        drv.current = Some(name.to_string());
+        (drv.node, drv.from, drv.fade) = (Some(node), None, 1.0);
+    } else if !same || restarted {
+        // The node being faded out of is dropped: only two clips are ever blended.
+        if let Some(old) = drv.from.take() {
+            ap.stop(old);
+        }
+        let next = if drv.node == Some(node) { twin } else { node };
+        ap.play(next).pause();
+        (drv.from, drv.node, drv.fade) = (drv.node, Some(next), 0.0);
     }
-    if let Some(a) = ap.animation_mut(node) {
+    drv.current = Some(name.to_string());
+    drv.time = time;
+    drv.fade = (drv.fade + dt / CLIP_FADE).min(1.0);
+    let k = if drv.from.is_some() { drv.fade * drv.fade * (3.0 - 2.0 * drv.fade) } else { 1.0 };
+    if let Some(n) = drv.node
+        && let Some(a) = ap.animation_mut(n)
+    {
         a.seek_to(time);
+        a.set_weight(k);
+    }
+    if let Some(old) = drv.from {
+        if drv.fade >= 1.0 {
+            ap.stop(old);
+            drv.from = None;
+        } else if let Some(a) = ap.animation_mut(old) {
+            a.set_weight(1.0 - k);
+        }
     }
 }
 
@@ -526,7 +577,7 @@ fn drive_player_anims(
                 let Some(def) = action.def(t) else {
                     // Death: stay on the last frame.
                     let m = &anims.markers["death"];
-                    set_clip(&mut drv, anims, &mut players, "death", m.frames / 60.0);
+                    set_clip(&mut drv, anims, &mut players, "death", m.frames / 60.0, dt);
                     continue;
                 };
                 let tick = (action.tick as f32 + over - 1.0).max(0.0);
@@ -567,7 +618,7 @@ fn drive_player_anims(
                 (n, tm)
             }
         };
-        set_clip(&mut drv, anims, &mut players, &name, tm);
+        set_clip(&mut drv, anims, &mut players, &name, tm, dt);
     }
 }
 
@@ -610,7 +661,7 @@ fn drive_boss_anims(
                 ("idle".to_string(), loop_time(&mut drv, anims, "idle", dt, 1.0))
             }
         };
-        set_clip(&mut drv, anims, &mut players, &name, tm);
+        set_clip(&mut drv, anims, &mut players, &name, tm, dt);
     }
 }
 
@@ -645,7 +696,7 @@ fn drive_enemy_anims(
             };
             (n.to_string(), loop_time(&mut drv, anims, n, dt, rate))
         };
-        set_clip(&mut drv, anims, &mut players, &name, tm);
+        set_clip(&mut drv, anims, &mut players, &name, tm, dt);
     }
 }
 
