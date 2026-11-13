@@ -450,6 +450,10 @@ pub fn state_hash(world: &mut World) -> u64 {
             b.below_target.hash(&mut h);
             b.flight.map(|(a, b)| (a.to_bits(), b.to_bits())).hash(&mut h);
             id_of(world, b.target).hash(&mut h);
+            b.hold.hash(&mut h);
+            for &(p, v) in &b.threat {
+                (id_of(world, Some(p)), v.to_bits()).hash(&mut h);
+            }
         }
         if let Some(s) = world.get::<spell::Spell>(e) {
             for f in [s.pos.x, s.pos.y, s.pos.z] {

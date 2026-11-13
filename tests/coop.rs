@@ -487,3 +487,74 @@ fn the_password_picks_the_room() {
     assert_ne!(room_name("psx-souls", "lantern"), room_name("psx-souls", "Lantern"));
     assert!(!room_name("psx-souls", "lantern").contains("lantern"), "not in clear");
 }
+
+/// Boss aggro for two: the closest player by default; a player who deals clearly more damage
+/// than its target takes it over, a little more doesn't; the threat fades with time.
+#[test]
+fn the_boss_goes_for_whoever_threatens_it_most() {
+    use psx_souls::sim::boss::{AGGRO_MARGIN, AGGRO_STRAY};
+    use psx_souls::sim::rng::SimRng;
+    let t = Tuning::builtin();
+    let mut w = World::new();
+    let (melee, mage) = (w.spawn_empty().id(), w.spawn_empty().id());
+    let present = [(melee, Vec3::new(2.0, 0.0, 0.0)), (mage, Vec3::new(15.0, 0.0, 0.0))];
+    let max_hp = 5000.0;
+    let mut boss = Boss::new(&t, 0, 0);
+    boss.retarget(Vec3::ZERO, max_hp, &present, None);
+    assert_eq!(boss.target, Some(melee), "nobody hit it: the closest");
+
+    // The mage plinks from afar while the melee player hits: left alone.
+    boss.add_threat(melee, 150.0);
+    boss.add_threat(mage, 150.0 * AGGRO_MARGIN);
+    boss.retarget(Vec3::ZERO, max_hp, &present, None);
+    assert_eq!(boss.target, Some(melee), "a little more damage isn't enough from afar");
+    // They start hurting for real: it turns on them…
+    boss.add_threat(mage, 300.0);
+    boss.retarget(Vec3::ZERO, max_hp, &present, None);
+    assert_eq!(boss.target, Some(mage));
+    // …and the melee player needs the same margin to take it back.
+    boss.add_threat(melee, 300.0);
+    boss.retarget(Vec3::ZERO, max_hp, &present, None);
+    assert_eq!(boss.target, Some(mage), "no ping-pong");
+
+    // Its target is gone: the other one, whatever the threat.
+    boss.retarget(Vec3::ZERO, max_hp, &present[..1], None);
+    assert_eq!(boss.target, Some(melee));
+
+    // At the end of an attack, it sometimes goes for the other player; never a die roll alone.
+    let mut rng = SimRng::default();
+    let before = rng.0;
+    boss.retarget(Vec3::ZERO, max_hp, &present[..1], Some(&mut rng));
+    assert_eq!((boss.target, rng.0), (Some(melee), before));
+    let mut strays = 0;
+    for _ in 0..2000 {
+        boss.target = Some(mage);
+        boss.retarget(Vec3::ZERO, max_hp, &present, Some(&mut rng));
+        strays += (boss.target == Some(melee)) as u32;
+    }
+    let rate = strays as f32 / 2000.0;
+    assert!((rate - AGGRO_STRAY).abs() < 0.03, "stray rate {rate}");
+}
+
+/// In the fight itself: the boss has a target among the two, switches at once when that one
+/// falls, and the damage it took weighs less and less.
+#[test]
+fn the_boss_turns_to_the_survivor_and_forgets_old_wounds() {
+    let t = Tuning::builtin();
+    let mut app = party(2, Progress { arena: Some(0), ..Progress::new_game(&t) });
+    idle(&mut app, 3);
+    let w = app.world_mut();
+    let boss = w.query_filtered::<Entity, With<Boss>>().iter(w).next().expect("a boss");
+    let first = w.get::<Boss>(boss).unwrap().target.expect("a target");
+    let id = w.get::<Player>(first).unwrap().id;
+    let other = player(&mut app, 1 - id).0;
+    app.world_mut().get_mut::<Boss>(boss).unwrap().add_threat(first, 400.0);
+    kill(&mut app, id);
+    idle(&mut app, 1);
+    assert_eq!(app.world().get::<Boss>(boss).unwrap().target, Some(other));
+    let fresh = app.world().get::<Boss>(boss).unwrap().threat_of(first);
+    assert!(fresh > 390.0 && fresh < 400.0, "{fresh}");
+    idle(&mut app, 60);
+    let faded = app.world().get::<Boss>(boss).unwrap().threat_of(first);
+    assert!(faded > 250.0 && faded < 350.0, "{faded}");
+}

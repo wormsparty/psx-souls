@@ -12,6 +12,21 @@ use super::rng::SimRng;
 use super::world::{self, STEP_UP, Zone};
 use super::{DT, SimDebug, SimEvent, SimEvents, SimId, SimIds, SimTick, math, sim_order, spell};
 
+/// Aggro (co-op). Each player's threat is the damage they dealt recently (it fades, see
+/// `BossDef::aggro_ticks`) plus a bonus for standing close. To take the boss away from its
+/// target, another player's threat must exceed the target's by this factor.
+pub const AGGRO_MARGIN: f32 = 1.3;
+/// Closeness bonus, as a share of the boss's max health, for a player right against it…
+pub const AGGRO_NEAR: f32 = 0.02;
+/// …halved at this distance (m), a third at twice that, and so on.
+pub const AGGRO_REACH: f32 = 4.0;
+/// Chance, at the end of each attack, that it goes for somebody else anyway: nobody is safe.
+pub const AGGRO_STRAY: f32 = 0.1;
+/// Outside its attacks, it sticks to its target for this many ticks before reconsidering.
+pub const AGGRO_HOLD: u32 = 120;
+/// Threat under which a player is forgotten.
+const AGGRO_FORGET: f32 = 0.5;
+
 #[derive(Component, Clone, Debug)]
 pub struct Boss {
     /// Definition (index in `Tuning::bosses`).
@@ -20,8 +35,10 @@ pub struct Boss {
     pub arena: u8,
     pub phase: u8,
     pub target: Option<Entity>,
-    /// Last player to hit it, and when (aggro in co-op).
-    pub last_attacker: Option<(Entity, u32)>,
+    /// Threat of each player who hit it recently (aggro in co-op, see `retarget`).
+    pub threat: Vec<(Entity, f32)>,
+    /// Ticks left before it reconsiders its target outside an attack (`AGGRO_HOLD`).
+    pub hold: u32,
     pub stagger: f32,
     pub stagger_delay: u32,
     /// Tick from which each attack becomes available again.
@@ -50,7 +67,8 @@ impl Boss {
             arena,
             phase: 1,
             target: None,
-            last_attacker: None,
+            threat: Vec::new(),
+            hold: 0,
             stagger: 0.0,
             stagger_delay: 0,
             cooldowns: vec![0; t.bosses[def as usize].attacks.len()],
@@ -67,6 +85,48 @@ impl Boss {
 
     pub fn def<'a>(&self, t: &'a Tuning) -> &'a BossDef {
         &t.bosses[self.def as usize]
+    }
+
+    /// A player dealt it `damage`: that much more threat.
+    pub fn add_threat(&mut self, player: Entity, damage: f32) {
+        match self.threat.iter_mut().find(|t| t.0 == player) {
+            Some(t) => t.1 += damage,
+            None => self.threat.push((player, damage)),
+        }
+    }
+
+    pub fn threat_of(&self, player: Entity) -> f32 {
+        self.threat.iter().find(|t| t.0 == player).map_or(0.0, |t| t.1)
+    }
+
+    /// Target choice among the living players of its arena (`present`, with their position):
+    /// the highest threat, counting the closeness bonus, but it only leaves its current target
+    /// for a threat `AGGRO_MARGIN` times higher. With `stray` (end of an attack), a small chance
+    /// of going for somebody else. Alone, a player is always the target (and no die is rolled).
+    pub fn retarget(&mut self, from: Vec3, max_hp: f32, present: &[(Entity, Vec3)], stray: Option<&mut SimRng>) {
+        let near = AGGRO_NEAR * max_hp;
+        let score = |&(e, pos): &(Entity, Vec3)| self.threat_of(e) + near * AGGRO_REACH / (AGGRO_REACH + pos.distance(from));
+        let mut best: Option<(Entity, f32)> = None;
+        for p in present {
+            let s = score(p);
+            if best.is_none_or(|(_, b)| s > b) {
+                best = Some((p.0, s));
+            }
+        }
+        let held = self.target.and_then(|e| present.iter().find(|p| p.0 == e)).map(score);
+        let mut pick = match (best, held) {
+            (Some((_, b)), Some(h)) if b <= h * AGGRO_MARGIN => self.target,
+            _ => best.map(|b| b.0),
+        };
+        if let Some(rng) = stray
+            && present.len() > 1
+            && rng.next_f32() < AGGRO_STRAY
+        {
+            let others: Vec<Entity> = present.iter().map(|p| p.0).filter(|&e| Some(e) != pick).collect();
+            pick = Some(others[rng.range(0, others.len() as u32 - 1) as usize]);
+        }
+        self.target = pick;
+        self.hold = AGGRO_HOLD;
     }
 
     /// Adds stagger; returns true if the boss becomes staggered.
@@ -123,24 +183,28 @@ pub fn boss_act(
         }
         action.executed = true;
 
-        // Target choice: recent last attacker, otherwise the nearest living player (among those
-        // in its arena).
+        // Target (see `Boss::retarget`): kept for the whole attack, reconsidered when it ends,
+        // then now and then while it walks; at once if the target is gone (dead, left the arena).
         let here = Zone::Arena(boss.arena);
-        let alive = |e: Entity| players.get(e).is_ok_and(|(_, _, h, p)| !h.dead() && p.zone == here);
-        let recent = boss
-            .last_attacker
-            .filter(|&(e, at)| now.saturating_sub(at) <= bd.aggro_ticks && alive(e))
-            .map(|(e, _)| e);
-        boss.target = recent.or_else(|| {
-            players
-                .iter_many(&order)
-                .filter(|(_, _, h, p)| !h.dead() && p.zone == here)
-                .min_by(|a, b| a.1.pos.distance(body.pos).total_cmp(&b.1.pos.distance(body.pos)))
-                .map(|(e, ..)| e)
+        let fade = bd.aggro_ticks.max(1) as f32;
+        boss.threat.retain_mut(|(_, v)| {
+            *v -= *v / fade;
+            *v > AGGRO_FORGET
         });
-        let target_pos = boss.target.and_then(|e| players.get(e).ok()).map(|(_, b, ..)| b.pos);
+        boss.hold = boss.hold.saturating_sub(1);
+        let present: Vec<(Entity, Vec3)> = players
+            .iter_many(&order)
+            .filter(|(_, _, h, p)| !h.dead() && p.zone == here)
+            .map(|(e, b, ..)| (e, b.pos))
+            .collect();
+        let gone = boss.target.is_none_or(|e| !present.iter().any(|p| p.0 == e));
+        if gone || (action.mv.is_none() && boss.hold == 0) {
+            boss.retarget(body.pos, health.max, &present, None);
+        }
+        let locate = |boss: &Boss| boss.target.and_then(|e| present.iter().find(|p| p.0 == e)).map(|p| p.1);
+        let mut target_pos = locate(&boss);
         // Height of the target relative to the boss: a step above, it's out of reach.
-        let rise = target_pos.map_or(0.0, |tp| tp.y - body.pos.y);
+        let mut rise = target_pos.map_or(0.0, |tp| tp.y - body.pos.y);
         boss.below_target = if rise > STEP_UP { boss.below_target + 1 } else { 0 };
 
         // Climbing jump cut short (stagger, death): it falls back onto the nearest floor.
@@ -201,6 +265,10 @@ pub fn boss_act(
                     boss.idle = bd.idle_ticks[0];
                 }
             }
+            // Its move is over: whom does it go for next?
+            boss.retarget(body.pos, health.max, &present, Some(&mut rng));
+            target_pos = locate(&boss);
+            rise = target_pos.map_or(0.0, |tp| tp.y - body.pos.y);
         }
 
         // Asleep as long as nobody has entered the arena.

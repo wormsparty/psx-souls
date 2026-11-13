@@ -135,7 +135,7 @@ pub fn load(world: &mut World, snap: &Snapshot) {
             &mut e,
             s.boss.clone().map(|mut b| {
                 b.target = b.target.map(to);
-                b.last_attacker = b.last_attacker.map(|(a, at)| (to(a), at));
+                b.threat.iter_mut().for_each(|t| t.0 = to(t.0));
                 b
             }),
         );

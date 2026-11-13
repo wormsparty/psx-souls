@@ -295,7 +295,7 @@ pub fn resolve_hits(
             let dmg = h.damage * p.damage_mult() * mult;
             fhp.cur = (fhp.cur - dmg).max(0.0);
             if let Some(b) = boss.as_mut() {
-                b.last_attacker = Some((pe, now));
+                b.add_threat(pe, dmg);
             }
             // Regain: hitting restores part of the HP lost while guarding.
             let heal = (dmg * t.player.regain_ratio).min(p.regain);

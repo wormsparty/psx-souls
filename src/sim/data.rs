@@ -494,7 +494,8 @@ pub struct BossDef {
     pub stagger_decay: f32,
     /// Pause (min, max) between two attacks: that's where you punish.
     pub idle_ticks: [u32; 2],
-    /// Duration during which the last attacker keeps the aggro.
+    /// Aggro memory: time constant (ticks) over which the threat of the damage a player dealt
+    /// fades (about a third is left after that long). See `Boss::retarget`.
     pub aggro_ticks: u32,
     pub groggy: MoveDef,
     pub fatal_received: MoveDef,
