@@ -8,7 +8,7 @@ use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use super::boss::Boss;
-use super::data::{BossMove, MoveRef, Tuning};
+use super::data::{BossMove, Class, MoveRef, Tuning};
 use super::fighter::{Action, Body, Foe, Health, Hitstop, PrevBody};
 use super::input::{MAX_PLAYERS, PlayerInputs};
 use super::items::{Inventory, Item, Loot};
@@ -72,6 +72,11 @@ pub struct Progress {
     pub picked: u64,
     /// Defeated unique enemies (bit i: `level.enemies[i]`).
     pub slain: u64,
+    /// Warrior or mage (an old save: a warrior), and the mage's selected spell.
+    #[serde(default)]
+    pub class: Class,
+    #[serde(default)]
+    pub spell: u8,
     /// Start in this arena, in front of its bosses (debug: `SOULS_BOSS`). Never saved (a
     /// player's progress never has it), but sent to the co-op guests with the host's world.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -81,6 +86,11 @@ pub struct Progress {
 impl Progress {
     pub fn new_game(t: &Tuning) -> Self {
         Self { inventory: Inventory::new_game(t), found: 1, ..default() }
+    }
+
+    /// A new character of class `class`, with its first weapon.
+    pub fn new_character(t: &Tuning, class: Class) -> Self {
+        Self { class, weapon: t.class_weapon(class), ..Self::new_game(t) }
     }
 
     /// State to resume for this player. Dead (or mid-fall): as after the
@@ -108,6 +118,8 @@ impl Progress {
             // only counts the bosses defeated with them.
             defeated: if p.id == 0 { enc.defeated } else { p.felled },
             weapon: p.weapon,
+            class: p.class,
+            spell: p.spell,
             inventory,
             hp: (!dead).then_some(hp.cur),
             pos,
@@ -235,7 +247,9 @@ fn revive(t: &Tuning, p: &mut Player, body: &mut Body, prev: &mut PrevBody, acti
     let mut inventory = p.inventory.clone();
     inventory.refill(t);
     *p = Player {
+        class: p.class,
         weapon: p.weapon,
+        spell: p.spell,
         inventory,
         checkpoint: p.checkpoint,
         found: p.found,
@@ -356,6 +370,7 @@ pub fn encounter_tick(
             if !h.dead() {
                 h.cur = h.max;
                 p.inventory.refill(t);
+                p.mana = t.magic.max_mana;
                 events.push(SimEvent::Heal { entity: e });
             } else if p.zone == Zone::Arena(arena) && !p.falling {
                 revive(t, &mut p, &mut b, &mut prev, &mut a, &mut h, &mut stop, door_entry(t, arena as usize), Zone::Arena(arena));
@@ -389,6 +404,10 @@ pub enum SimCommand {
     Travel { player: u8, checkpoint: u8 },
     /// Co-op: the player left the game (or lost the connection), their character vanishes.
     Leave { player: u8 },
+    /// At a checkpoint (outside a boss fight): the player takes on another class.
+    SetClass { player: u8, class: Class },
+    /// The mage selects one of their spells (keyboard: 1, 2, 3).
+    Attune { player: u8, spell: u8 },
 }
 
 const CMD_EQUIP: u8 = 1;
@@ -396,6 +415,8 @@ const CMD_TALISMAN: u8 = 2;
 const CMD_REVIVE: u8 = 3;
 const CMD_TRAVEL: u8 = 4;
 const CMD_LEAVE: u8 = 5;
+const CMD_CLASS: u8 = 6;
+const CMD_ATTUNE: u8 = 7;
 const NO_ITEM: u8 = u8::MAX;
 
 fn item_code(item: Option<Item>) -> u8 {
@@ -416,6 +437,8 @@ impl SimCommand {
             SimCommand::ReviveBoss(i) => (CMD_REVIVE, i, 0),
             SimCommand::Travel { checkpoint, .. } => (CMD_TRAVEL, checkpoint, 0),
             SimCommand::Leave { .. } => (CMD_LEAVE, 0, 0),
+            SimCommand::SetClass { class, .. } => (CMD_CLASS, class as u8, 0),
+            SimCommand::Attune { spell, .. } => (CMD_ATTUNE, spell, 0),
         };
         [seq.max(1), kind, a, b]
     }
@@ -428,6 +451,8 @@ impl SimCommand {
             CMD_REVIVE => SimCommand::ReviveBoss(a),
             CMD_TRAVEL => SimCommand::Travel { player, checkpoint: a },
             CMD_LEAVE => SimCommand::Leave { player },
+            CMD_CLASS => SimCommand::SetClass { player, class: *Class::ALL.get(a as usize)? },
+            CMD_ATTUNE => SimCommand::Attune { player, spell: a },
             _ => return None,
         })
     }
@@ -513,6 +538,23 @@ pub fn apply_commands(
                     let k = super::fighter::party_hp(n - 1, lead) / super::fighter::party_hp(n, lead);
                     h.max *= k;
                     h.cur *= k;
+                }
+            }
+            SimCommand::SetClass { player, class } => {
+                for (e, mut p, b, h) in &mut players {
+                    // Only resting at a checkpoint, outside a fight.
+                    if p.id == player && !enc.active && !h.dead() && near_checkpoint(&tuning, b.pos).is_some() && p.class != class {
+                        p.set_class(class, &tuning);
+                        events.push(SimEvent::ClassChanged { entity: e });
+                    }
+                }
+            }
+            SimCommand::Attune { player, spell } => {
+                for (e, mut p, ..) in &mut players {
+                    if p.id == player && p.class == Class::Mage && (spell as usize) < tuning.magic.spells.len() && p.spell != spell {
+                        p.spell = spell;
+                        events.push(SimEvent::SpellSwitched { entity: e });
+                    }
                 }
             }
             SimCommand::ReviveBoss(i) => {

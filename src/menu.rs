@@ -25,7 +25,7 @@ use crate::settings::{
     DisplayMode, INTERNAL_HEIGHTS, MODERN_HEIGHT, PS1_HEIGHT, Settings, exclusive_sizes, refresh_rates,
     windowed_sizes,
 };
-use crate::sim::data::Tuning;
+use crate::sim::data::{Class, Tuning};
 use crate::sim::encounter::{Encounter, Progress, SimCommand, SimCommands, near_checkpoint};
 use crate::sim::fighter::Body;
 use crate::sim::items::{Item, Kind, QUICK_SLOTS};
@@ -66,6 +66,8 @@ pub enum Page {
     Language,
     /// Graphics style choice (PS1 or modern) on first launch.
     Style,
+    /// Class choice: for a new character (`false`), or at a checkpoint (`true`).
+    Class(bool),
 }
 
 #[derive(Resource)]
@@ -101,7 +103,7 @@ impl Default for MenuState {
 
 impl MenuState {
     pub fn on_title(&self) -> bool {
-        self.open && matches!(self.page, Page::Title | Page::Language | Page::Style)
+        self.open && matches!(self.page, Page::Title | Page::Language | Page::Style | Page::Class(false))
     }
 
     /// Opens the menu on a page (without touching the cursor).
@@ -183,6 +185,10 @@ enum Entry {
     Talisman,
     /// Weapon (index in `Tuning::weapons`): shown in the equipment, weapons are switched in game.
     Weapon(u8),
+    /// The mage's spell (index in `MagicDef::spells`): shown in the equipment.
+    Spell(u8),
+    /// Class offered (class choice page).
+    Class(Class),
     /// Item offered for the slot being chosen (`None`: empty it).
     Pick(Option<Item>),
     /// Travel destination (checkpoint index).
@@ -204,21 +210,25 @@ enum Entry {
 /// Line of the character sheet (status page).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Stat {
+    Class,
     Hp,
     Stamina,
     Attack,
     Defense,
     Flasks,
+    Mana,
 }
 
 impl Stat {
-    const ALL: [Stat; 5] = [Stat::Hp, Stat::Stamina, Stat::Attack, Stat::Defense, Stat::Flasks];
+    const ALL: [Stat; 7] = [Stat::Class, Stat::Hp, Stat::Stamina, Stat::Mana, Stat::Attack, Stat::Defense, Stat::Flasks];
 
     fn label(self) -> &'static str {
         match self {
+            Stat::Class => tr("Class", "Classe"),
+            Stat::Mana => tr("Mana (regeneration per second)", "Mana (régénération par seconde)"),
             Stat::Hp => tr("Hit points", "Points de vie"),
             Stat::Stamina => tr("Stamina", "Endurance"),
-            Stat::Attack => tr("Attack (weapon in hand)", "Attaque (arme en main)"),
+            Stat::Attack => tr("Attack (weapon or spell in hand)", "Attaque (arme ou sort en main)"),
             Stat::Defense => tr("Damage reduction", "Réduction des dégâts"),
             Stat::Flasks => tr("Healing flasks", "Fioles de soin"),
         }
@@ -228,6 +238,15 @@ impl Stat {
         match self {
             Stat::Hp => format!("{}", t.player.max_hp.round()),
             Stat::Stamina => format!("{}", t.player.max_stamina.round()),
+            Stat::Class => p.class.name().into(),
+            Stat::Mana if p.class == Class::Mage => format!("{} ({})", t.magic.max_mana.round(), t.magic.mana_regen),
+            Stat::Mana => "—".into(),
+            // A mage: the spell ready to be cast.
+            Stat::Attack if p.class == Class::Mage => {
+                let s = t.magic.spells.get(p.spell as usize);
+                let power = s.map_or(0.0, |s| s.spell.damage);
+                format!("{} ({})", power.round(), s.map_or("", |s| s.name.get()))
+            }
             Stat::Attack => {
                 let w = t.weapons.get(p.weapon as usize);
                 // The first light attack's hit.
@@ -246,8 +265,11 @@ struct PageCtx {
     has_save: bool,
     /// Boss whose torch is being rekindled.
     reviving: u8,
-    /// Number of weapons.
+    /// The local player's class (the class page marks it), its weapons (bits, in the order of
+    /// `Tuning::weapons`) and its spells (count, shown in the equipment).
+    class: Class,
     weapons: u8,
+    spells: u8,
     device: Device,
     /// Checkpoints discovered by the local player (bits), and the one they're at.
     found: u32,
@@ -265,11 +287,12 @@ fn owned_bits(p: Option<&Player>) -> u16 {
 
 /// Grid pages (left/right and up/down move around them): number of cells in each row,
 /// for `n` entries.
-fn grid_rows(page: Page, n: usize, weapons: usize) -> Option<Vec<usize>> {
+fn grid_rows(page: Page, entries: &[Entry]) -> Option<Vec<usize>> {
+    let n = entries.len();
     match page {
         Page::Revive => Some(vec![n]),
-        // The important equipment (talisman, weapons), then the consumables.
-        Page::Equipment => Some(vec![weapons + 1, QUICK_SLOTS]),
+        // The important equipment (talisman, weapons, spells), then the consumables.
+        Page::Equipment => Some(vec![n - QUICK_SLOTS, QUICK_SLOTS]),
         // The pause menu: a row of icons.
         Page::Pause => Some(vec![n]),
         _ => None,
@@ -304,12 +327,12 @@ fn help_lines(device: Device) -> Vec<(&'static str, Vec<Seg>)> {
             (tr("Light attack", "Attaque légère"), vec![i(Glyph::PadRB)]),
             (tr("Heavy attack (hold: charge)", "Attaque lourde (maintenir : charge)"), vec![i(Glyph::PadRT)]),
             (tr("Guard (well-timed: perfect)", "Garde (au bon moment : parfaite)"), vec![i(Glyph::PadLB)]),
-            (tr("Special attack", "Attaque spéciale"), vec![i(Glyph::PadLT)]),
+            (tr("Special attack (warrior)", "Attaque spéciale (guerrier)"), vec![i(Glyph::PadLT)]),
             (tr("Dodge", "Esquive"), vec![i(Glyph::PadB)]),
             (tr("Sprint", "Course"), vec![t(tr("hold", "maintenir")), i(Glyph::PadB), or(), i(Glyph::StickL3)]),
             (tr("Use item", "Utiliser l'objet"), vec![i(Glyph::PadX)]),
             (tr("Next item", "Objet suivant"), vec![i(Glyph::DpadDown)]),
-            (tr("Switch weapon", "Changer d'arme"), vec![i(Glyph::DpadRight)]),
+            (tr("Switch weapon (mage: next spell)", "Changer d'arme (magicien : sort suivant)"), vec![i(Glyph::DpadRight)]),
             (tr("Lock on", "Verrouillage"), vec![i(Glyph::StickR3)]),
             (tr("Switch target (locked on)", "Changer de cible (verrouillé)"), vec![i(Glyph::StickR), t(tr("4 directions (up: higher)", "4 directions (haut : plus haut)"))]),
             (tr("Rest (checkpoint)", "Se reposer (checkpoint)"), vec![i(Glyph::PadA)]),
@@ -327,11 +350,12 @@ fn help_lines(device: Device) -> Vec<(&'static str, Vec<Seg>)> {
             (tr("Light attack", "Attaque légère"), vec![i(Glyph::MouseLeft)]),
             (tr("Heavy attack (hold: charge)", "Attaque lourde (maintenir : charge)"), vec![i(Glyph::Key(tr("SHIFT", "MAJ"))), t("+"), i(Glyph::MouseLeft)]),
             (tr("Guard (well-timed: perfect)", "Garde (au bon moment : parfaite)"), vec![i(Glyph::MouseRight)]),
-            (tr("Special attack", "Attaque spéciale"), vec![i(Glyph::Key(tr("SHIFT", "MAJ"))), t("+"), i(Glyph::MouseRight)]),
+            (tr("Special attack (warrior)", "Attaque spéciale (guerrier)"), vec![i(Glyph::Key(tr("SHIFT", "MAJ"))), t("+"), i(Glyph::MouseRight)]),
             (tr("Dodge (hold: sprint)", "Esquive (maintenir : course)"), vec![i(Glyph::Key(tr("SPACE", "ESPACE")))]),
             (tr("Use item", "Utiliser l'objet"), vec![i(Glyph::Key("R"))]),
             (tr("Next item", "Objet suivant"), vec![i(Glyph::Key("↓"))]),
             (tr("Switch weapon (1: rapier, 2: greatsword)", "Changer d'arme (1 : rapière, 2 : espadon)"), vec![i(Glyph::Key("1/2"))]),
+            (tr("Mage: choose the spell (light attack casts it)", "Magicien : choisir le sort (l'attaque légère le lance)"), vec![i(Glyph::Key("1/2"))]),
             (
                 tr("Lock on", "Verrouillage"),
                 vec![i(Glyph::Key("Q")), or(), i(Glyph::MouseMiddle), t("AZERTY"), i(Glyph::Key("A"))],
@@ -357,18 +381,30 @@ fn entries(page: Page, c: &PageCtx) -> Vec<Entry> {
         Page::Pause => vec![Entry::Act(Open(Page::Equipment)), Entry::Act(Open(Page::Status)), Entry::Act(Open(Page::System))],
         Page::System => vec![Entry::Act(Open(Page::Options)), Entry::Act(Open(Page::Help)), Entry::Act(ToTitle)],
         // "Leave" first: it's the line selected on opening.
-        Page::Checkpoint if c.coop => vec![Entry::Act(Leave), Entry::Act(Open(Page::Travel)), Entry::Act(Open(Page::Equipment)), Entry::Act(LeaveCoop)],
+        Page::Checkpoint if c.coop => vec![
+            Entry::Act(Leave),
+            Entry::Act(Open(Page::Travel)),
+            Entry::Act(Open(Page::Equipment)),
+            Entry::Act(Open(Page::Class(true))),
+            Entry::Act(LeaveCoop),
+        ],
         Page::Checkpoint => vec![
             Entry::Act(Leave),
             Entry::Act(Open(Page::Travel)),
             Entry::Act(Open(Page::Equipment)),
+            Entry::Act(Open(Page::Class(true))),
             Entry::Act(OnlineHost),
             Entry::Act(OnlineJoin),
         ],
         Page::Travel => (0..32u8).filter(|i| c.found & (1 << i) != 0).map(Entry::Place).chain([Entry::Act(Back)]).collect(),
         // Grids: go back with Esc / (B).
         Page::Revive => vec![Entry::Boss(c.reviving)],
-        Page::Equipment => [Entry::Talisman].into_iter().chain((0..c.weapons).map(Entry::Weapon)).chain((0..QUICK_SLOTS as u8).map(Entry::Slot)).collect(),
+        Page::Equipment => [Entry::Talisman]
+            .into_iter()
+            .chain((0..8u8).filter(|w| c.weapons & (1 << w) != 0).map(Entry::Weapon))
+            .chain((0..c.spells).map(Entry::Spell))
+            .chain((0..QUICK_SLOTS as u8).map(Entry::Slot))
+            .collect(),
         Page::Choose => {
             let kind = if c.choosing as usize == QUICK_SLOTS { Kind::Talisman } else { Kind::Consumable };
             std::iter::once(Entry::Pick(None))
@@ -395,6 +431,7 @@ fn entries(page: Page, c: &PageCtx) -> Vec<Entry> {
         Page::Help => (0..help_lines(c.device).len() as u8).map(Entry::Line).chain([Entry::Act(Back)]).collect(),
         Page::Language => Lang::ALL.into_iter().map(Entry::Lang).collect(),
         Page::Style => vec![Entry::Style(PS1_HEIGHT), Entry::Style(MODERN_HEIGHT)],
+        Page::Class(_) => Class::ALL.into_iter().map(Entry::Class).collect(),
     };
     if NATIVE && matches!(page, Page::Title | Page::System) {
         v.push(Entry::Act(Quit));
@@ -423,6 +460,7 @@ fn act_label(a: Act) -> &'static str {
         Act::Open(Page::Options) => tr("Options", "Options"),
         Act::Open(Page::Help) => tr("Help", "Aide"),
         Act::Open(Page::Travel) => tr("Travel", "Voyager"),
+        Act::Open(Page::Class(_)) => tr("Change class", "Changer de classe"),
         Act::Open(_) => "…",
         Act::OnlineHost => tr("Kindle a beacon", "Allumer un fanal"),
         Act::OnlineJoin => tr("Heed a beacon", "Répondre à un fanal"),
@@ -468,6 +506,7 @@ fn page_title(p: Page, device: Device) -> &'static str {
         Page::Help => tr("HELP — KEYBOARD AND MOUSE", "AIDE — CLAVIER ET SOURIS"),
         Page::Language => "LANGUAGE / LANGUE",
         Page::Style => tr("GRAPHICS STYLE", "STYLE GRAPHIQUE"),
+        Page::Class(_) => tr("CLASS", "CLASSE"),
         Page::Online(true) => tr("KINDLE A BEACON", "ALLUMER UN FANAL"),
         Page::Online(false) => tr("HEED A BEACON", "RÉPONDRE À UN FANAL"),
     }
@@ -481,6 +520,14 @@ fn page_info(p: Page) -> &'static str {
         Page::Revive => tr(
             "The boss will await you again beyond its fog, at full strength.",
             "Le boss vous attendra de nouveau derrière sa brume, en pleine forme.",
+        ),
+        Page::Class(false) => tr(
+            "Choose your path. It can be changed later by resting at a checkpoint.",
+            "Choisissez votre voie. Modifiable ensuite en vous reposant à un checkpoint.",
+        ),
+        Page::Class(true) => tr(
+            "Your items and progress are kept; the mana is restored.",
+            "Vos objets et votre progression sont conservés ; le mana est restauré.",
         ),
         Page::Style => tr(
             "Can be changed at any time in Options (Internal resolution).",
@@ -757,6 +804,27 @@ struct StyleImages {
 /// Size of the illustrations, in dots.
 const STYLE_IMAGE_SIZE: UVec2 = UVec2::new(192, 108);
 
+/// Portraits of the classes (`assets/ui/class_<name>.png`, rendered by
+/// `tools/blender/class_icons.py`), in the order of `Class::ALL`.
+#[derive(Resource)]
+struct ClassImages(Vec<Handle<Image>>);
+
+const CLASS_IMAGE_SIZE: UVec2 = UVec2::new(128, 160);
+
+/// What a class card says under the portrait.
+fn class_blurb(c: Class) -> &'static str {
+    match c {
+        Class::Warrior => tr(
+            "Rapier and greatsword. Guards, parries\nand trades blows up close.",
+            "Rapière et espadon. Garde, pare\net frappe au corps à corps.",
+        ),
+        Class::Mage => tr(
+            "A staff and two spells: arcane bolt\nand arcane lance. Powerful, but slow to\ngather: a blow breaks them.",
+            "Un bâton et deux sorts : trait et lance\narcaniques. Puissants, mais longs à\nrassembler : un coup les interrompt.",
+        ),
+    }
+}
+
 pub struct MenuPlugin;
 
 impl Plugin for MenuPlugin {
@@ -776,6 +844,7 @@ impl Plugin for MenuPlugin {
 
 fn spawn_menu(mut commands: Commands, ui_font: Res<UiFont>, preview: Res<CheckpointPreview>, assets: Res<AssetServer>, tuning: Res<Tuning>) {
     commands.insert_resource(StyleImages { ps1: assets.load("ui/style_ps1.png"), modern: assets.load("ui/style_modern.png") });
+    commands.insert_resource(ClassImages(Class::ALL.iter().map(|c| assets.load(format!("ui/class_{}.png", c.key()))).collect()));
     commands.insert_resource(BossPortraits((0..tuning.encounters.len()).map(|i| assets.load(format!("ui/boss_{i}.png"))).collect()));
     let text = Color::srgba(0.85, 0.82, 0.75, 0.75);
     commands
@@ -1127,7 +1196,8 @@ fn first_launch_page(s: &Settings) -> Page {
 }
 
 pub enum Launch {
-    New,
+    /// A new character, of this class.
+    New(Class),
     Load,
 }
 
@@ -1135,7 +1205,7 @@ pub enum Launch {
 pub fn launch(w: &mut World, how: Launch) {
     let t = w.resource::<Tuning>().clone();
     let (progress, play_time) = match how {
-        Launch::New => (Progress::new_game(&t), 0.0),
+        Launch::New(class) => (Progress::new_character(&t, class), 0.0),
         Launch::Load => match w.resource::<SaveSlot>().data.clone() {
             Some(d) => (d.progress, d.play_time),
             None => return,
@@ -1144,7 +1214,7 @@ pub fn launch(w: &mut World, how: Launch) {
     {
         let mut slot = w.resource_mut::<SaveSlot>();
         slot.play_time = play_time;
-        if matches!(how, Launch::New) {
+        if matches!(how, Launch::New(_)) {
             slot.store(SaveData { version: crate::save::VERSION, play_time, progress: progress.clone() });
         }
     }
@@ -1335,13 +1405,17 @@ fn menu_input(
 
 fn page_ctx(w: &mut World) -> PageCtx {
     let (found, here) = local_place(w);
+    let t = w.resource::<Tuning>().clone();
+    let class = local_player(w).map_or(Class::Warrior, |p| p.class);
     let owned = owned_bits(local_player(w).as_ref());
     PageCtx {
         owned,
         choosing: w.resource::<MenuState>().choosing,
         has_save: w.resource::<SaveSlot>().data.is_some(),
         reviving: w.resource::<MenuState>().reviving,
-        weapons: w.resource::<Tuning>().weapons.len() as u8,
+        class,
+        weapons: t.class_weapons(class).fold(0, |b, i| b | 1 << i),
+        spells: if class == Class::Mage { t.magic.spells.len() as u8 } else { 0 },
         device: *w.resource::<Device>(),
         found,
         here,
@@ -1392,8 +1466,8 @@ fn handle(w: &mut World, intent: Intent) {
         }
         // Grids: up/down change rows (staying in the column, or on the last
         // cell of a shorter row), left/right change columns (without wrapping).
-        Intent::Move(d) if grid_rows(page, list.len(), ctx.weapons as usize).is_some() => {
-            let rows = grid_rows(page, list.len(), ctx.weapons as usize).unwrap_or_default();
+        Intent::Move(d) if grid_rows(page, &list).is_some() => {
+            let rows = grid_rows(page, &list).unwrap_or_default();
             let (r, c) = grid_pos(&rows, selected);
             let to = r as i32 + d;
             if (0..rows.len() as i32).contains(&to) {
@@ -1402,8 +1476,8 @@ fn handle(w: &mut World, intent: Intent) {
                 w.resource_mut::<MenuState>().selected = start + c.min(rows[to] - 1);
             }
         }
-        Intent::Change(d) if grid_rows(page, list.len(), ctx.weapons as usize).is_some() => {
-            let rows = grid_rows(page, list.len(), ctx.weapons as usize).unwrap_or_default();
+        Intent::Change(d) if grid_rows(page, &list).is_some() => {
+            let rows = grid_rows(page, &list).unwrap_or_default();
             let (r, c) = grid_pos(&rows, selected);
             let to = c as i32 + d;
             if (0..rows[r] as i32).contains(&to) {
@@ -1422,7 +1496,7 @@ fn handle(w: &mut World, intent: Intent) {
             w.resource_mut::<MenuState>().selected = i as usize;
         }
         // Styles side by side: left/right switch from one to the other.
-        Intent::Change(d) if page == Page::Style => {
+        Intent::Change(d) if matches!(page, Page::Style | Page::Class(_)) => {
             w.resource_mut::<MenuState>().selected = (selected as i32 + d).clamp(0, list.len() as i32 - 1) as usize;
         }
         Intent::Change(d) => {
@@ -1443,7 +1517,7 @@ fn handle(w: &mut World, intent: Intent) {
         Intent::Click(i) => {
             if let Some(e) = list.get(i).filter(|e| selectable(**e, &ctx)) {
                 w.resource_mut::<MenuState>().selected = i;
-                if matches!(e, Entry::Act(_) | Entry::Boss(_) | Entry::Slot(_) | Entry::Talisman | Entry::Pick(_)) {
+                if matches!(e, Entry::Act(_) | Entry::Boss(_) | Entry::Slot(_) | Entry::Talisman | Entry::Pick(_) | Entry::Class(_)) {
                     confirm(w, *e);
                 }
             }
@@ -1476,6 +1550,23 @@ fn confirm(w: &mut World, e: Entry) {
         Entry::Password => act(w, Act::Search),
         // Weapons are only shown: they're switched in game.
         Entry::Weapon(_) => {}
+        // A spell picked in the equipment becomes the one ready to be cast.
+        Entry::Spell(spell) => {
+            let Some(p) = local_player(w) else { return };
+            crate::net::send_command(w, SimCommand::Attune { player: p.id, spell });
+        }
+        Entry::Class(class) => {
+            if w.resource::<MenuState>().page == Page::Class(false) {
+                launch(w, Launch::New(class));
+                return;
+            }
+            // At a checkpoint: the new class right away (sim paused in solo), saved.
+            if let Some(p) = local_player(w).filter(|p| p.class != class) {
+                crate::net::send_command(w, SimCommand::SetClass { player: p.id, class });
+                crate::save::save_now(w);
+            }
+            w.resource_mut::<MenuState>().back();
+        }
         // Confirming an option advances it by one step (wrapping for binary choices).
         Entry::Opt(o) => {
             let mon = monitor(w);
@@ -1546,13 +1637,10 @@ fn act(w: &mut World, a: Act) {
     match a {
         Act::Leave => close(w),
         Act::NewGame => {
-            if w.resource::<SaveSlot>().data.is_some() {
-                w.resource_mut::<MenuState>().push(Page::ConfirmNew);
-            } else {
-                launch(w, Launch::New);
-            }
+            let page = if w.resource::<SaveSlot>().data.is_some() { Page::ConfirmNew } else { Page::Class(false) };
+            w.resource_mut::<MenuState>().push(page);
         }
-        Act::ConfirmNew => launch(w, Launch::New),
+        Act::ConfirmNew => w.resource_mut::<MenuState>().push(Page::Class(false)),
         Act::Load => launch(w, Launch::Load),
         Act::Open(p) => w.resource_mut::<MenuState>().push(p),
         Act::Back => {
@@ -1633,6 +1721,10 @@ fn entry_value(e: Entry, c: &PageCtx, s: &Settings, m: Option<&Monitor>, player:
         Entry::Boss(_) => (tr("Rekindle", "Raviver").into(), true),
         Entry::Weapon(i) if player.is_some_and(|p| p.weapon == i) => (tr("In hand", "En main").into(), true),
         Entry::Weapon(_) => (String::new(), true),
+        Entry::Spell(i) if player.is_some_and(|p| p.spell == i) => (tr("Ready", "Prêt").into(), true),
+        Entry::Spell(i) => (t.magic.spells.get(i as usize).map_or(String::new(), |s| format!("{} {}", s.mana as u32, tr("mana", "mana"))), true),
+        Entry::Class(cl) if c.class == cl && player.is_some() => (tr("Current", "Actuelle").into(), true),
+        Entry::Class(_) => (String::new(), true),
         Entry::Stat(st) => (player.map_or(String::new(), |p| st.value(p, t)), true),
         Entry::Line(..) | Entry::Lang(_) | Entry::Style(_) | Entry::Act(_) | Entry::Password => (String::new(), true),
     }
@@ -1644,6 +1736,8 @@ fn entry_label(e: Entry, t: &Tuning, device: Device) -> String {
         Entry::Boss(i) => t.encounters.get(i as usize).map_or("", |c| c.name.get()).into(),
         Entry::Talisman => tr("Talisman", "Talisman").into(),
         Entry::Weapon(i) => t.weapons.get(i as usize).map_or("", |w| w.name.get()).into(),
+        Entry::Spell(i) => t.magic.spells.get(i as usize).map_or("", |s| s.name.get()).into(),
+        Entry::Class(c) => c.name().into(),
         Entry::Pick(Some(it)) => it.name().into(),
         Entry::Pick(None) => tr("(empty)", "(vide)").into(),
         Entry::Act(a) => act_label(a).into(),
@@ -1664,6 +1758,7 @@ struct CardCtx {
     frame: Color,
     portraits: Vec<Handle<Image>>,
     weapons: Vec<Handle<Image>>,
+    spells: Vec<Handle<Image>>,
     equipment: Handle<Image>,
     status: Handle<Image>,
     system: Handle<Image>,
@@ -1712,6 +1807,10 @@ fn spawn_card(c: &mut ChildSpawnerCommands, i: usize, e: Entry, k: &CardCtx) {
                 let b = boxed(c, ITEM_ICON as u32);
                 c.commands().entity(b).with_child(image_bundle(k.weapons.get(wi as usize).cloned().unwrap_or_default(), UVec2::splat(ITEM_ICON as u32)));
             }
+            Entry::Spell(si) => {
+                let b = boxed(c, ITEM_ICON as u32);
+                c.commands().entity(b).with_child(image_bundle(k.spells.get(si as usize).cloned().unwrap_or_default(), UVec2::splat(ITEM_ICON as u32)));
+            }
             // Item cell, at the size of the choice list icons (and its quantity).
             _ => {
                 let b = boxed(c, ITEM_ICON as u32);
@@ -1728,7 +1827,7 @@ fn spawn_card(c: &mut ChildSpawnerCommands, i: usize, e: Entry, k: &CardCtx) {
         }
         let wrap = if matches!(e, Entry::Boss(_)) { LineBreak::WordBoundary } else { LineBreak::NoWrap };
         c.spawn((k.font.text("", 1, Color::srgb(0.85, 0.82, 0.75)), TextLayout::new(Justify::Center, wrap), RowLabel(i)));
-        if matches!(e, Entry::Boss(_) | Entry::Weapon(_)) {
+        if matches!(e, Entry::Boss(_) | Entry::Weapon(_) | Entry::Spell(_)) {
             // No line wrapping: otherwise the card is estimated taller than it is.
             c.spawn((k.font.text("", 1, Color::srgb(0.95, 0.92, 0.85)), TextLayout::new(Justify::Center, LineBreak::NoWrap), RowValue(i)));
         }
@@ -1747,14 +1846,17 @@ fn build_rows(w: &mut World, list: Entity, entries: &[Entry], page: Page) {
     let item_icon = |w: &World, it: Item| w.get_resource::<ItemIcons>().map(|ic| ic.get(it)).unwrap_or_default();
     let pick_icons: Vec<Option<Handle<Image>>> =
         entries.iter().map(|e| if let Entry::Pick(Some(it)) = e { Some(item_icon(w, *it)) } else { None }).collect();
-    let side_by_side = entries.iter().any(|e| matches!(e, Entry::Style(_)));
+    let side_by_side = entries.iter().any(|e| matches!(e, Entry::Style(_) | Entry::Class(_)));
     let n_weapons = w.resource::<Tuning>().weapons.len();
-    let grid = grid_rows(page, entries.len(), n_weapons);
+    let n_spells = w.resource::<Tuning>().magic.spells.len();
+    let class_images = w.resource::<ClassImages>().0.clone();
+    let grid = grid_rows(page, entries);
     let card = CardCtx {
         font: ui_font.clone(),
         frame: Color::srgb(0.62, 0.55, 0.42),
         portraits: w.resource::<BossPortraits>().0.clone(),
         weapons: (0..n_weapons).map(|i| w.get_resource::<WeaponIcons>().map(|ic| ic.get(i)).unwrap_or_default()).collect(),
+        spells: (0..n_spells).map(|i| w.get_resource::<WeaponIcons>().map(|ic| ic.spell(i)).unwrap_or_default()).collect(),
         equipment: w.get_resource::<MenuIcons>().map(|m| m.equipment.clone()).unwrap_or_default(),
         status: w.get_resource::<MenuIcons>().map(|m| m.status.clone()).unwrap_or_default(),
         system: w.get_resource::<MenuIcons>().map(|m| m.system.clone()).unwrap_or_default(),
@@ -1786,6 +1888,24 @@ fn build_rows(w: &mut World, list: Entity, entries: &[Entry], page: Page) {
     }
     commands.entity(list).despawn_children().with_children(|c| {
         for (i, e) in entries.iter().enumerate() {
+            if let Entry::Class(cl) = *e {
+                // Card: portrait, class name (and "current"), what it does.
+                let image = class_images.get(cl as usize).cloned().unwrap_or_default();
+                c.spawn((
+                    Row(i),
+                    Button,
+                    Node { flex_direction: FlexDirection::Column, align_items: AlignItems::Center, row_gap: px(8), padding: UiRect::all(px(10)), ..default() },
+                    BackgroundColor(Color::NONE),
+                ))
+                .with_children(|c| {
+                    c.spawn((Node { border: UiRect::all(px(2)), ..default() }, BorderColor::all(Color::srgb(0.62, 0.55, 0.42))))
+                        .with_child(image_bundle(image, CLASS_IMAGE_SIZE));
+                    c.spawn((ui_font.text("", 2, Color::srgb(0.85, 0.82, 0.75)), RowLabel(i)));
+                    c.spawn((ui_font.text("", 1, Color::srgb(0.95, 0.85, 0.55)), RowValue(i)));
+                    c.spawn((ui_font.text(class_blurb(cl), 1, Color::srgb(0.78, 0.75, 0.68)), TextLayout::new(Justify::Center, LineBreak::NoWrap)));
+                });
+                continue;
+            }
             if let Entry::Style(h) = *e {
                 // Card: illustration, style name, description.
                 let (image, desc) = if h == PS1_HEIGHT {
@@ -1929,10 +2049,13 @@ fn refresh_menu(
         .next()
         .map_or((0, None), |(p, b)| (p.found, near_checkpoint(&tuning, b.pos)));
     let owned = owned_bits(players.iter().next().map(|(p, _)| p));
+    let class = players.iter().next().map_or(Class::Warrior, |(p, _)| p.class);
     let ctx = PageCtx {
         has_save: save.data.is_some(),
         reviving: menu.reviving,
-        weapons: tuning.weapons.len() as u8,
+        class,
+        weapons: tuning.class_weapons(class).fold(0, |b, i| b | 1 << i),
+        spells: if class == Class::Mage { tuning.magic.spells.len() as u8 } else { 0 },
         device: *device,
         found,
         here,
@@ -1974,14 +2097,15 @@ fn refresh_menu(
             n.display = want;
         }
     }
-    let mut footer = if matches!(menu.page, Page::Language | Page::Style) {
+    let mut footer = if matches!(menu.page, Page::Language | Page::Style | Page::Class(_)) {
         // Nothing to modify on these pages: choose and confirm. The language isn't chosen yet
         // on the first one.
-        let keys = if menu.page == Page::Style { ["←", "→"] } else { ["↑", "↓"] };
+        let across = matches!(menu.page, Page::Style | Page::Class(_));
+        let keys = if across { ["←", "→"] } else { ["↑", "↓"] };
         let (nav, ok) = if *device == Device::Gamepad { (vec![i(Glyph::Dpad)], Glyph::PadA) } else { (keys.map(|k| i(Glyph::Key(k))).to_vec(), Glyph::Key("↵")) };
-        let select = if menu.page == Page::Style { tr("select", "choisir") } else { "select / choisir" };
+        let select = if menu.page == Page::Language { "select / choisir" } else { tr("select", "choisir") };
         nav.into_iter().chain([t(select), i(ok), t("OK")]).collect()
-    } else if grid_rows(menu.page, list_entries.len(), ctx.weapons as usize).is_some() || menu.page == Page::Choose {
+    } else if grid_rows(menu.page, &list_entries).is_some() || menu.page == Page::Choose {
         // Nothing to modify: choose, confirm.
         let nav = if *device == Device::Gamepad {
             vec![i(Glyph::Dpad)]
@@ -2084,6 +2208,10 @@ fn refresh_menu(
         (None, Some(Entry::Weapon(i))) => {
             let w = tuning.weapons.get(*i as usize);
             format!("{} — {}", w.map_or("", |w| w.name.get()), w.map_or("", |w| w.description.get()))
+        }
+        (None, Some(Entry::Spell(i))) => {
+            let s = tuning.magic.spells.get(*i as usize);
+            format!("{} — {}", s.map_or("", |s| s.name.get()), s.map_or("", |s| s.description.get()))
         }
         _ => String::new(),
     };

@@ -7,7 +7,7 @@ use ggrs::SessionBuilder;
 use psx_souls::net::{Coop, run_requests};
 use psx_souls::sim::boss::Boss;
 use psx_souls::sim::enemy::Enemy;
-use psx_souls::sim::data::Tuning;
+use psx_souls::sim::data::{Class, Tuning};
 use psx_souls::sim::encounter::{self, Encounter, Progress, RESPAWN_TICKS, SimCommand};
 use psx_souls::sim::fighter::{Body, Health};
 use psx_souls::sim::input::{MAX_PLAYERS, PlayerInput, PlayerInputs, btn};
@@ -91,6 +91,8 @@ fn replayed_ticks_give_the_same_state() {
     let starts = (0..t.encounters.len() as u8).map(Some).chain([None]);
     for arena in starts {
         let mut app = party(2, Progress { arena, ..Progress::new_game(&t) });
+        // The guest plays a mage: their spells are replayed too.
+        app.world_mut().resource_mut::<ResetFight>().guests = vec![Progress::new_character(&t, Class::Mage)];
         let mut session = SessionBuilder::<Coop>::new()
             .with_num_players(2)
             .unwrap()
@@ -116,6 +118,7 @@ fn replayed_ticks_give_the_same_state() {
 fn a_restored_snapshot_replays_identically() {
     let t = Tuning::builtin();
     let mut app = party(2, Progress { arena: Some(1), ..Progress::new_game(&t) });
+    app.world_mut().resource_mut::<ResetFight>().guests = vec![Progress::new_character(&t, Class::Mage)];
     for i in 0..120 {
         step(&mut app, &[scripted(i, 0), scripted(i, 1)]);
     }
@@ -153,7 +156,9 @@ fn storage_order_does_not_change_the_simulation() {
             b.world_mut().spawn_empty();
         }
         b.add_plugins(SimPlugin);
-        *b.world_mut().resource_mut::<ResetFight>() = ResetFight { requested: true, players: 2, progress: Some(Progress { arena, ..Progress::new_game(&t) }), guests: Vec::new() };
+        let mage = vec![Progress::new_character(&t, Class::Mage)];
+        a.world_mut().resource_mut::<ResetFight>().guests = mage.clone();
+        *b.world_mut().resource_mut::<ResetFight>() = ResetFight { requested: true, players: 2, progress: Some(Progress { arena, ..Progress::new_game(&t) }), guests: mage };
         for i in 0..1200 {
             let inputs = [scripted(i, 0), scripted(i, 1)];
             step(&mut a, &inputs);
@@ -351,6 +356,9 @@ fn commands_survive_their_encoding() {
         SimCommand::ReviveBoss(4),
         SimCommand::Travel { player: 2, checkpoint: 1 },
         SimCommand::Leave { player: 2 },
+        SimCommand::SetClass { player: 2, class: Class::Mage },
+        SimCommand::SetClass { player: 2, class: Class::Warrior },
+        SimCommand::Attune { player: 2, spell: 2 },
     ] {
         let raw = c.encode(9);
         assert_ne!(raw[0], 0);

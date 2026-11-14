@@ -147,7 +147,16 @@ GUARD = merge(
     arm("L", (-72, -8, 0), (-22, 0, 0), (0, 0, 0)),
 )
 
-STANCES = {"rapier": STANCE_R, "greatsword": STANCE_G}
+# Staff guard (the mage): held upright in the right hand, the crystal a little ahead; the left
+# hand open, ready to cast.
+STANCE_S = merge(
+    legs(-14, 20, 10, 18, -0.04, twist=8),
+    {"chest": (4, 0, 4), "head": (0, 0, -6)},
+    arm("R", (-14, 14, 0), (-70, 0, 0), (-4, 0, 0)),
+    arm("L", (-24, -24, 0), (-58, 0, 0), (0, 0, 0)),
+)
+
+STANCES = {"rapier": STANCE_R, "greatsword": STANCE_G, "staff": STANCE_S}
 
 markers = {}
 
@@ -407,6 +416,65 @@ LANDED = merge(CHOP_LOW, legs(-65, 85, 40, 80, -0.3, fwd=0.12), {"chest": (42, 0
 anim("greatsword_special", [
     (0, STANCE_G), (5, CROUCH), (12, TAKEOFF), (20, APEX), ("h0-1", merge(APEX, {"chest": (-28, 0, 0)})),
     ("h0+3", CLEAVE), ("h0+6", LANDED), ("h0e+14", LANDED), ("T", STANCE_G),
+])
+
+# ----------------------------------------------------------------------------- staff (mage)
+# Spells: the casting goes off at "c0" (`release`). Arcane bolt: the staff drawn back, then thrust
+# out towards the target, the crystal ahead (the bolt leaves from its tip).
+DRAW_S = merge(legs(-10, 25, 18, 25, -0.06, twist=20), {"chest": (-4, 0, 30), "head": (0, 0, -24)},
+               arm("R", (-40, 30, 0), (-80, 0, 0), (30, 0, 0)), arm("L", (-60, -10, 0), (-40, 0, 0)))
+THRUST_S = merge(legs(-40, 40, 25, 10, -0.1, twist=10, fwd=0.08), {"chest": (10, 0, -6), "head": (-4, 0, 4)},
+                 arm("R", (-88, 6, 0), (-4, 0, 0), (84, 0, 0)), arm("L", (-40, -30, 0), (-30, 0, 0)))
+anim("cast_bolt", [
+    (0, STANCE_S), ("c0-7", DRAW_S), ("c0", THRUST_S), ("c0+7", THRUST_S),
+    ("c0+14", merge(STANCE_S, {"chest": (8, 0, 0)})), ("T", STANCE_S),
+])
+# Arcane lance: the staff raised high in both hands while the lance gathers, drawn back, then
+# thrust out with the whole body towards the target.
+RAISE_S = merge(legs(-8, 12, 8, 12, 0.0), {"chest": (-14, 0, 0), "head": (-18, 0, 0)},
+                arm("R", (-165, 14, 0), (-12, 0, 0), (87, 0, 0)), arm("L", (-160, -16, 0), (-14, 0, 0)))
+LUNGE_S = merge(legs(-55, 50, 35, 8, -0.16, twist=8, fwd=0.2), {"chest": (16, 0, -4), "head": (-8, 0, 4)},
+                arm("R", (-90, 4, 0), (-2, 0, 0), (88, 0, 0)), arm("L", (-80, -20, 0), (-10, 0, 0)))
+anim("cast_lance", [
+    (0, STANCE_S), (14, RAISE_S), ("c0-24", merge(RAISE_S, {"chest": (-20, 0, 6)})),
+    ("c0-10", merge(DRAW_S, {"chest": (-8, 0, 40)})), ("c0", LUNGE_S), ("c0+12", LUNGE_S),
+    ("c0+22", merge(STANCE_S, {"chest": (10, 0, 0)})), ("T", STANCE_S),
+])
+
+
+# The staff's blows: a wide horizontal swing (heavy), held overhead then brought down (charged).
+def staff_sweep(z_from, z_to, name):
+    wind = merge(STANCE_S, {"chest": (2, 0, z_from * 1.1), "head": (0, 0, -z_from * 0.6)},
+                 arm("R", (-72, 12, z_from * 0.4), (-20, 0, 0), (90, 0, 0)))
+    hit_a = merge(legs(-32, 30, 20, 14, -0.1, fwd=0.06), {"chest": (8, 0, z_from), "head": (0, 0, -z_from * 0.5)},
+                  arm("R", (-84, 6, 0), (-6, 0, 0), (90, 0, 0)), arm("L", (-30, -30, 0), (-40, 0, 0)))
+    hit_b = merge(hit_a, {"chest": (8, 0, z_to), "head": (0, 0, -z_to * 0.5)})
+    follow = merge(hit_b, {"chest": (12, 0, z_to * 1.2)}, arm("R", (-60, 10, z_to * 0.3), (-20, 0, 0), (95, 0, 0)))
+    anim(name, [(0, STANCE_S), ("h0-6", wind), ("h0", hit_a), ("h0e", hit_b), ("h0e+8", follow), ("T", STANCE_S)])
+
+
+staff_sweep(55, -55, "staff_heavy")
+OVERHEAD_S = merge(legs(-12, 25, 18, 25, -0.06), {"chest": (-14, 0, 0), "head": (-6, 0, 0)},
+                   arm("R", (-170, 8, 0), (-10, 0, 0), (40, 0, 0)), arm("L", (-160, -20, 0), (-20, 0, 0)))
+SMASH_S = merge(legs(-45, 40, 30, 12, -0.16, fwd=0.12), {"chest": (30, 0, 0), "head": (-10, 0, 0)},
+                arm("R", (-75, 6, 0), (-4, 0, 0), (30, 0, 0)), arm("L", (-40, -20, 0), (-20, 0, 0)))
+SMASH_LOW_S = merge(SMASH_S, {"chest": (38, 0, 0)}, arm("R", (-55, 6, 0), (-4, 0, 0), (36, 0, 0)))
+anim("staff_charge", [(0, STANCE_S), ("T", OVERHEAD_S)])
+anim("staff_heavy_charged", [
+    (0, OVERHEAD_S), ("h0-4", merge(OVERHEAD_S, {"chest": (-20, 0, 0)})), ("h0", SMASH_S), ("h0e", SMASH_LOW_S),
+    ("h0e+12", SMASH_LOW_S), ("T", STANCE_S),
+])
+# Fatal blow: the staff's iron foot driven down into the fallen boss.
+HIGH_S = merge(STANCE_S, {"chest": (-10, 0, 10)}, arm("R", (-160, 20, 0), (-20, 0, 0), (60, 0, 0)))
+DRIVE_S = merge(legs(-50, 60, 30, 30, -0.25, twist=10, fwd=0.1), {"chest": (35, 0, 0)},
+                arm("R", (-70, 5, 0), (-10, 0, 0), (110, 0, 0)), arm("L", (-60, -10, 0), (-20, 0, 0)))
+anim("staff_fatal", [
+    (0, STANCE_S), (24, HIGH_S), ("h0-4", HIGH_S), ("h0", DRIVE_S), ("h0e+20", DRIVE_S),
+    ("h0e+32", merge(STANCE_S, legs(-10, 20, 30, 20, -0.05, twist=8))), ("T", STANCE_S),
+])
+anim("staff_jump", [
+    (0, merge(OVERHEAD_S, AIR_LEGS)), ("h0-3", merge(OVERHEAD_S, AIR_LEGS, {"chest": (-18, 0, 0)})),
+    ("h0", merge(SMASH_S, legs(-40, 50, -10, 40, -0.1))), ("h0e+8", SMASH_LOW_S), ("T", STANCE_S),
 ])
 
 missing = sorted(set(T) - set(markers))

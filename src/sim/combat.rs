@@ -292,43 +292,19 @@ pub fn resolve_hits(
             // Plunging attack: a jump attack from high above the opponent (from a gallery).
             let plunge = matches!(hit.mv, MoveRef::Weapon(_, WeaponMove::Jump)) && p.air_from - fbody.pos.y >= PLUNGE_HEIGHT;
             let mult = if plunge { PLUNGE_MULT } else { 1.0 };
-            let dmg = h.damage * p.damage_mult() * mult;
-            fhp.cur = (fhp.cur - dmg).max(0.0);
-            if let Some(b) = boss.as_mut() {
-                b.add_threat(pe, dmg);
-            }
-            // Regain: hitting restores part of the HP lost while guarding.
-            let heal = (dmg * t.player.regain_ratio).min(p.regain);
-            if heal > 0.0 {
-                php.cur = (php.cur + heal).min(php.max);
-                p.regain -= heal;
-            }
-            // Special attack and fatal blow hits don't recharge the gauge (otherwise the special,
-            // which staggers, would pay for itself through the fatal blow that follows).
-            if !matches!(hit.mv, MoveRef::Weapon(_, WeaponMove::Special | WeaponMove::Fatal)) {
-                p.special += dmg * t.player.special_per_damage;
-            }
             pstop.0 = pstop.0.max(h.hitstop);
             fstop.0 = fstop.0.max(h.hitstop);
-            let pos = impact_point(pbody, fbody);
-            let heavy = matches!(hit.mv, MoveRef::Weapon(_, WeaponMove::HeavyCharged | WeaponMove::Fatal | WeaponMove::Jump));
-            events.push(SimEvent::Hit { pos, heavy, foe: Some(fe) });
-            if fhp.dead() {
-                if let Some(b) = boss.as_ref() {
-                    fact.start(MoveRef::Boss(b.def, BossMove::Death), 0.0);
-                    fact.executed = false;
-                    events.push(SimEvent::BossDied);
-                } else if let Some(e) = enemy.as_mut() {
-                    fact.start(MoveRef::Enemy(e.kind, EnemyMove::Death), 0.0);
-                    fact.executed = false;
-                    if e.unique {
-                        slain |= 1u64 << e.spawn;
-                    }
-                    events.push(SimEvent::EnemyDied { pos: fbody.pos });
-                }
-            } else if foe_stagger(boss.as_deref_mut(), enemy.as_deref_mut(), pe, h.stagger * mult, dmg, &mut fact, t) {
-                events.push(SimEvent::Groggy { entity: fe });
-            }
+            let strike = Strike {
+                damage: h.damage * mult,
+                stagger: h.stagger * mult,
+                // Special attack and fatal blow hits don't recharge the gauge (otherwise the special,
+                // which staggers, would pay for itself through the fatal blow that follows).
+                gauge: !matches!(hit.mv, MoveRef::Weapon(_, WeaponMove::Special | WeaponMove::Fatal)),
+                heavy: matches!(hit.mv, MoveRef::Weapon(_, WeaponMove::HeavyCharged | WeaponMove::Fatal | WeaponMove::Jump)),
+                pos: impact_point(pbody, fbody),
+            };
+            let foe = FoeHit { entity: fe, boss: boss.as_deref_mut(), enemy: enemy.as_deref_mut(), body: fbody, health: &mut fhp, action: &mut fact };
+            damage_foe(t, pe, Some((&mut p, &mut php)), foe, &strike, &mut events, &mut slain);
         } else if let Ok((fe, mut boss, mut enemy, fbody, _, mut fact, mut fstop)) = foes.get_mut(hit.attacker) {
             // Opponent → player.
             let Ok((pe, mut p, pbody, mut php, mut pact, mut pstop)) = players.get_mut(hit.victim) else {
@@ -358,6 +334,72 @@ pub fn resolve_hits(
         for (_, mut p, ..) in &mut players {
             p.slain |= slain;
         }
+    }
+}
+
+/// A player's blow landing on an opponent: an attack window, or one of the mage's spells.
+pub struct Strike {
+    pub damage: f32,
+    pub stagger: f32,
+    /// It fills the special gauge.
+    pub gauge: bool,
+    /// Heavy impact (sound, sparks).
+    pub heavy: bool,
+    /// Impact point (sparks).
+    pub pos: Vec3,
+}
+
+/// The opponent being hit.
+pub struct FoeHit<'a> {
+    pub entity: Entity,
+    pub boss: Option<&'a mut Boss>,
+    pub enemy: Option<&'a mut Enemy>,
+    pub body: &'a Body,
+    pub health: &'a mut Health,
+    pub action: &'a mut Action,
+}
+
+/// Applies a player's blow to an opponent: damage (ember resin included), the boss's threat,
+/// the player's regain and special gauge, then the opponent's death or stagger. `player`:
+/// the attacker (`None` if they've left the game since casting). The unique enemies defeated
+/// are added to `slain`.
+pub fn damage_foe(t: &Tuning, attacker: Entity, player: Option<(&mut Player, &mut Health)>, foe: FoeHit, s: &Strike, events: &mut SimEvents, slain: &mut u64) {
+    let FoeHit { entity: fe, mut boss, mut enemy, body: fbody, health: fhp, action: fact } = foe;
+    if fhp.dead() {
+        return;
+    }
+    let dmg = s.damage * player.as_ref().map_or(1.0, |(p, _)| p.damage_mult());
+    fhp.cur = (fhp.cur - dmg).max(0.0);
+    if let Some(b) = boss.as_mut() {
+        b.add_threat(attacker, dmg);
+    }
+    if let Some((p, php)) = player {
+        // Regain: hitting restores part of the HP lost while guarding.
+        let heal = (dmg * t.player.regain_ratio).min(p.regain);
+        if heal > 0.0 {
+            php.cur = (php.cur + heal).min(php.max);
+            p.regain -= heal;
+        }
+        if s.gauge {
+            p.special += dmg * t.player.special_per_damage;
+        }
+    }
+    events.push(SimEvent::Hit { pos: s.pos, heavy: s.heavy, foe: Some(fe) });
+    if fhp.dead() {
+        if let Some(b) = boss.as_ref() {
+            fact.start(MoveRef::Boss(b.def, BossMove::Death), 0.0);
+            fact.executed = false;
+            events.push(SimEvent::BossDied);
+        } else if let Some(e) = enemy.as_mut() {
+            fact.start(MoveRef::Enemy(e.kind, EnemyMove::Death), 0.0);
+            fact.executed = false;
+            if e.unique {
+                *slain |= 1u64 << e.spawn;
+            }
+            events.push(SimEvent::EnemyDied { pos: fbody.pos });
+        }
+    } else if foe_stagger(boss, enemy, attacker, s.stagger, dmg, fact, t) {
+        events.push(SimEvent::Groggy { entity: fe });
     }
 }
 
@@ -457,6 +499,17 @@ pub fn strike_player(
         force_move(p, pact, MoveRef::Player(PlayerMove::Death));
         events.push(SimEvent::PlayerDied { entity: victim });
     } else if !pact.hyperarmor(t) {
+        // A spell being cast is lost (its mana with it): the energy gathered fizzles out.
+        if let Some(MoveRef::Cast(si)) = pact.mv
+            && let Some(sd) = t.magic.spells.get(si as usize)
+            && pact.tick < sd.release
+        {
+            let element = sd.spell.element;
+            let from = if sd.from == [0.0; 3] { [0.25, 1.5, 0.7] } else { sd.from };
+            let at = math::local_to_world(pbody.pos, pbody.yaw, from);
+            events.push(SimEvent::SpellFizzle { pos: at, element, boss: super::magic::ALLY });
+            events.push(SimEvent::CastBroken { entity: victim });
+        }
         let mv = match blow.reaction {
             Reaction::Light => PlayerMove::HitLight,
             Reaction::Heavy => PlayerMove::HitHeavy,

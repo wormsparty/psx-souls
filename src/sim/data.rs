@@ -248,18 +248,53 @@ pub struct PlayerDef {
     pub heal_at: u32,
 }
 
+/// A character's class, chosen when creating it and changed at the checkpoints: the warrior
+/// fights with two weapons (rapier, greatsword), the mage with a staff and three spells.
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Class {
+    #[default]
+    Warrior,
+    Mage,
+}
+
+impl Class {
+    pub const ALL: [Class; 2] = [Class::Warrior, Class::Mage];
+
+    /// File name stem (`assets/ui/class_<key>.png`).
+    pub fn key(self) -> &'static str {
+        match self {
+            Class::Warrior => "warrior",
+            Class::Mage => "mage",
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Class::Warrior => crate::lang::tr("Warrior", "Guerrier"),
+            Class::Mage => crate::lang::tr("Mage", "Magicien"),
+        }
+    }
+}
+
 #[derive(Deserialize, Clone, Debug)]
 pub struct WeaponDef {
     pub name: LText,
     /// What it does best (equipment menu sheet).
     pub description: LText,
+    /// The class that fights with it (the warrior's weapons by default).
+    #[serde(default)]
+    pub class: Class,
+    /// Light attack combo. The staff has none: its light attack casts the selected spell.
+    #[serde(default)]
     pub light: Vec<MoveDef>,
     pub heavy: MoveDef,
     pub heavy_charged: MoveDef,
     /// Ticks held for a full charge: the charged attack then fires on its own.
     pub charge_ticks: u32,
     pub charge_anim: String,
-    pub special: MoveDef,
+    /// Special attack (gauge full). The staff has none.
+    #[serde(default)]
+    pub special: Option<MoveDef>,
     pub fatal: MoveDef,
     /// Jump attack (attack during a jump): more damage, little stamina (the jump
     /// already cost some).
@@ -269,6 +304,41 @@ pub struct WeaponDef {
 #[derive(Deserialize, Clone, Debug)]
 pub struct WeaponsDef {
     pub weapons: Vec<WeaponDef>,
+    pub magic: MagicDef,
+}
+
+/// The mage's magic: their mana and their spells.
+#[derive(Deserialize, Clone, Debug)]
+pub struct MagicDef {
+    pub max_mana: f32,
+    /// Mana recovered per second, once `mana_delay` ticks have passed since the last spell.
+    pub mana_regen: f32,
+    pub mana_delay: u32,
+    pub spells: Vec<MageSpellDef>,
+}
+
+/// A spell of the mage: the casting (its animation, its stamina), its mana, and what it does
+/// at `release`: a projectile or an eruption (same format as the bosses' spells).
+#[derive(Deserialize, Clone, Debug)]
+pub struct MageSpellDef {
+    pub name: LText,
+    pub description: LText,
+    pub mana: f32,
+    pub cast: MoveDef,
+    /// Tick of `cast` at which the spell goes off (hit before, the mana is lost).
+    pub release: u32,
+    /// Starting point of a projectile (caster's local frame: the tip of the staff).
+    #[serde(default)]
+    pub from: [f32; 3],
+    /// Without a locked target, the nearest opponent in front within this distance is aimed at;
+    /// failing that, an eruption bursts out `range / 3` metres ahead.
+    #[serde(default = "default_spell_range")]
+    pub range: f32,
+    pub spell: SpellDef,
+}
+
+fn default_spell_range() -> f32 {
+    18.0
 }
 
 /// Where the spells of a cast go.
@@ -334,6 +404,21 @@ pub enum Element {
     Iron,
     /// Ice of the hollow-spined beast.
     Ice,
+    /// The mage's pale blue arcane light.
+    Arcane,
+}
+
+impl Element {
+    /// Colour (sRGB) of a player's spell warnings, after its element.
+    pub fn color(self) -> [f32; 3] {
+        match self {
+            Element::Fire => [1.0, 0.42, 0.12],
+            Element::Light => [0.95, 0.85, 0.5],
+            Element::Iron => [0.45, 0.42, 0.4],
+            Element::Ice => [0.55, 0.82, 1.0],
+            Element::Arcane => [0.45, 0.62, 1.0],
+        }
+    }
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -345,6 +430,9 @@ pub struct SpellDef {
     pub element: Element,
     pub damage: f32,
     pub radius: f32,
+    /// Damage dealt to the stagger gauge (the mage's spells).
+    #[serde(default)]
+    pub stagger: f32,
     #[serde(default)]
     pub reaction: Reaction,
     #[serde(default = "default_hitstop")]
@@ -794,6 +882,7 @@ pub struct EnemiesDef {
 pub struct Tuning {
     pub player: PlayerDef,
     pub weapons: Vec<WeaponDef>,
+    pub magic: MagicDef,
     /// The first is the Automaton (`boss.ron`), then those of `bosses.ron`.
     pub bosses: Vec<BossDef>,
     /// Boss encounters (the first: the Automaton alone), and their arenas (same order).
@@ -837,12 +926,11 @@ impl Tuning {
             members: vec![MemberDef { boss: automaton.key.clone(), offset: [0.0, 0.0] }],
         }];
         encounters.extend(more.encounters);
+        let arms: WeaponsDef = opts.from_str(src.weapons).map_err(|e| p("weapons.ron", e))?;
         let t = Self {
             player: opts.from_str(src.player).map_err(|e| p("player.ron", e))?,
-            weapons: opts
-                .from_str::<WeaponsDef>(src.weapons)
-                .map_err(|e| p("weapons.ron", e))?
-                .weapons,
+            weapons: arms.weapons,
+            magic: arms.magic,
             bosses: std::iter::once(automaton).chain(more.bosses).collect(),
             encounters,
             arenas: opts.from_str::<ArenasDef>(src.arenas).map_err(|e| p("arenas.ron", e))?.arenas,
@@ -852,6 +940,24 @@ impl Tuning {
         for e in &t.level.enemies {
             if t.enemy_kind(&e.kind).is_none() {
                 return Err(format!("level.ron: unknown enemy type '{}'", e.kind));
+            }
+        }
+        for c in Class::ALL {
+            if !t.weapons.iter().any(|w| w.class == c) {
+                return Err(format!("weapons.ron: no weapon for the {c:?} class"));
+            }
+        }
+        for w in t.weapons.iter().filter(|w| w.class == Class::Warrior) {
+            if w.light.is_empty() || w.special.is_none() {
+                return Err(format!("weapons.ron: {} needs light attacks and a special", w.name.get()));
+            }
+        }
+        if t.magic.spells.is_empty() || t.magic.spells.len() > 8 {
+            return Err("weapons.ron: the mage needs 1 to 8 spells".into());
+        }
+        for s in &t.magic.spells {
+            if s.release >= s.cast.total || s.spell.kind == SpellKind::Beam {
+                return Err(format!("weapons.ron: spell {}: a release before the end, a projectile or an eruption", s.name.get()));
             }
         }
         if t.level.checkpoints.is_empty() {
@@ -930,8 +1036,19 @@ impl Tuning {
         self.enemies.iter().position(|k| k.key == key).map(|i| i as u8)
     }
 
+    /// The weapons of a class, in the order of `weapons.ron` (indices in `weapons`).
+    pub fn class_weapons(&self, c: Class) -> impl Iterator<Item = u8> + '_ {
+        self.weapons.iter().enumerate().filter(move |(_, w)| w.class == c).map(|(i, _)| i as u8)
+    }
+
+    /// The weapon a class starts with.
+    pub fn class_weapon(&self, c: Class) -> u8 {
+        self.class_weapons(c).next().unwrap_or(0)
+    }
+
     pub fn get(&self, r: MoveRef) -> &MoveDef {
         match r {
+            MoveRef::Cast(i) => &self.magic.spells[i as usize].cast,
             MoveRef::Player(m) => {
                 let p = &self.player;
                 match m {
@@ -953,7 +1070,8 @@ impl Tuning {
                     WeaponMove::Light(i) => &w.light[i as usize],
                     WeaponMove::Heavy => &w.heavy,
                     WeaponMove::HeavyCharged => &w.heavy_charged,
-                    WeaponMove::Special => &w.special,
+                    // Without a special, never started.
+                    WeaponMove::Special => w.special.as_ref().unwrap_or(&w.heavy),
                     WeaponMove::Fatal => &w.fatal,
                     WeaponMove::Jump => &w.jump,
                 }
@@ -986,6 +1104,8 @@ impl Tuning {
 pub enum MoveRef {
     Player(PlayerMove),
     Weapon(u8, WeaponMove),
+    /// The mage casting a spell (index in `MagicDef::spells`).
+    Cast(u8),
     /// Boss attack: (boss, attack).
     BossAttack(u8, u16),
     /// Shared boss action: (boss, action).
@@ -1041,7 +1161,9 @@ mod tests {
     #[test]
     fn builtin_tuning_parses() {
         let t = Tuning::builtin();
-        assert_eq!(t.weapons.len(), 2);
+        assert_eq!(t.weapons.len(), 3);
+        assert_eq!(t.class_weapons(Class::Warrior).count(), 2);
+        assert_eq!(t.magic.spells.len(), 2);
         assert!(!t.bosses[0].attacks.is_empty());
         // Boss follow-ups point to existing attacks.
         for b in &t.bosses {

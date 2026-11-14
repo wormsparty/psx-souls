@@ -42,11 +42,26 @@ pub struct Spell {
     /// Aimed projectile that hangs for a while (`delay`): its offset (radians) from the
     /// target's direction, to aim at it again when it launches.
     pub aim_off: Option<f32>,
+    /// Cast by this player (the mage): `spell` is then one of `MagicDef::spells`, `target` an
+    /// opponent, and it's `magic::ally_spell_tick` that moves it.
+    pub ally: Option<Entity>,
 }
 
 impl Spell {
     pub fn def<'a>(&self, t: &'a Tuning) -> &'a super::data::SpellDef {
-        &t.bosses[self.boss as usize].spells[self.spell as usize]
+        match self.ally {
+            // Only the spells that have one are cast (`Tuning::parse` checks it).
+            Some(_) => &t.magic.spells[self.spell as usize].spell,
+            None => &t.bosses[self.boss as usize].spells[self.spell as usize],
+        }
+    }
+
+    /// Colour of a spell's warnings: its boss's, or its element's for a player's.
+    pub fn color(&self, t: &Tuning) -> [f32; 3] {
+        match self.ally {
+            Some(_) => self.def(t).element.color(),
+            None => t.bosses[self.boss as usize].color,
+        }
     }
 
     /// Eruption: tick at which it bursts out.
@@ -123,6 +138,7 @@ pub fn cast(
         end: pos,
         landed: None,
         aim_off: None,
+        ally: None,
     };
     let mut spawn = |s: Spell| {
         commands.spawn((SimEntity, s));
@@ -213,6 +229,10 @@ pub fn spell_tick(
     let order = sim_order(&ids);
     let mut spell_it = spells.iter_many_mut(&order);
     while let Some((e, mut s)) = spell_it.fetch_next() {
+        // The players' spells: `magic::ally_spell_tick`.
+        if s.ally.is_some() {
+            continue;
+        }
         let sd = s.def(t).clone();
         s.age += 1;
         s.prev = s.pos;

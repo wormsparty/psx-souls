@@ -1,9 +1,10 @@
-"""Generates the weapons: assets/models/rapier.glb and greatsword.glb.
+"""Generates the weapons: assets/models/rapier.glb, greatsword.glb and staff.glb (the mage's).
 
 Origin = centre of the grip (where the hand holds the weapon), blade pointing forward (-Y Blender,
 +Z in Bevy).
 """
 
+import math
 import os
 import sys
 
@@ -15,6 +16,8 @@ STEEL = material("steel", (0.78, 0.8, 0.86))
 STEEL_DARK = material("steel_dark", (0.45, 0.47, 0.52))
 BRASS = material("brass", (0.8, 0.62, 0.28))
 GRIP = material("grip", tex=tex_noise((0.22, 0.13, 0.08), 0.5, seed=21))
+WOOD = material("staff_wood", tex=tex_noise((0.34, 0.24, 0.15), 0.45, seed=31))
+CRYSTAL = material("staff_crystal", (0.72, 0.85, 1.0), emissive=(0.35, 0.55, 1.0))
 
 
 def weapon(name, build):
@@ -51,7 +54,26 @@ def greatsword(mb):
     mb.seg((0, -0.3, 0.0), (0, -1.45, 0.0), 0.03, 0.034, STEEL_DARK)
 
 
-for name, build in (("rapier", rapier), ("greatsword", greatsword)):
+def staff(mb):
+    # Ash staff: ~1.65 m, held a third of the way up (the grip); the head points forward (-Y),
+    # the iron-shod foot backwards (+Y).
+    mb.seg((0, 0.52, 0), (0, -1.0, 0), 0.042, 0.042, WOOD, taper=0.8)
+    mb.box((0, 0.54, 0), (0.05, 0.06, 0.05), STEEL_DARK, taper=(0.7, 0.7))
+    mb.cylinder((0, 0.0, 0), 0.028, 0.18, GRIP, sides=6, axis="Y")
+    for y in (-0.11, 0.11, -0.9):
+        mb.cylinder((0, y, 0), 0.031, 0.025, BRASS, sides=6, axis="Y")
+    # Head: three prongs curling up around a pale crystal.
+    for k in range(3):
+        a = 2 * math.pi * k / 3
+        x, z = math.cos(a) * 0.075, math.sin(a) * 0.075
+        mb.seg((x * 0.3, -0.98, z * 0.3), (x, -1.1, z), 0.02, 0.02, WOOD)
+        mb.seg((x, -1.1, z), (x * 0.45, -1.27, z * 0.45), 0.018, 0.018, WOOD, taper=0.6)
+    # Bipyramid crystal (point towards the grip, then point ahead).
+    mb.cylinder((0, -1.11, 0), 0.065, 0.07, CRYSTAL, sides=6, axis="Y", radius_top=0.006)
+    mb.cylinder((0, -1.2, 0), 0.006, 0.11, CRYSTAL, sides=6, axis="Y", radius_top=0.065)
+
+
+for name, build in (("rapier", rapier), ("greatsword", greatsword), ("staff", staff)):
     for o in list(bpy.context.scene.objects):
         o.select_set(False)
     obj = weapon(name, build)

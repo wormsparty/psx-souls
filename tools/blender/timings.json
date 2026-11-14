@@ -3475,6 +3475,24 @@
       ],
       "total": 22
     },
+    "cast_bolt": {
+      "casts": [
+        30
+      ],
+      "hits": [],
+      "iframes": null,
+      "motion": [],
+      "total": 52
+    },
+    "cast_lance": {
+      "casts": [
+        66
+      ],
+      "hits": [],
+      "iframes": null,
+      "motion": [],
+      "total": 92
+    },
     "death": {
       "casts": [],
       "hits": [],
@@ -3901,6 +3919,74 @@
         }
       ],
       "total": 62
+    },
+    "staff_charge": {
+      "hits": [],
+      "motion": [],
+      "total": 40
+    },
+    "staff_fatal": {
+      "casts": [],
+      "hits": [
+        [
+          46,
+          48
+        ]
+      ],
+      "iframes": [
+        0,
+        96
+      ],
+      "motion": [],
+      "total": 96
+    },
+    "staff_heavy": {
+      "casts": [],
+      "hits": [
+        [
+          13,
+          18
+        ]
+      ],
+      "iframes": null,
+      "motion": [
+        {
+          "end": 14,
+          "speed": 2.4000000953674316,
+          "start": 6
+        }
+      ],
+      "total": 42
+    },
+    "staff_heavy_charged": {
+      "casts": [],
+      "hits": [
+        [
+          16,
+          21
+        ]
+      ],
+      "iframes": null,
+      "motion": [
+        {
+          "end": 14,
+          "speed": 3.0,
+          "start": 4
+        }
+      ],
+      "total": 56
+    },
+    "staff_jump": {
+      "casts": [],
+      "hits": [
+        [
+          8,
+          14
+        ]
+      ],
+      "iframes": null,
+      "motion": [],
+      "total": 40
     },
     "switch": {
       "casts": [],

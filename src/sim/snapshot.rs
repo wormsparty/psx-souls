@@ -152,6 +152,7 @@ pub fn load(world: &mut World, snap: &Snapshot) {
                 sp.target = sp.target.map(to);
                 sp.struck.iter_mut().for_each(|x| *x = to(*x));
                 sp.caster = sp.caster.map(|(c, seq)| (to(c), seq));
+                sp.ally = sp.ally.map(to);
                 sp
             }),
         );

@@ -18,7 +18,7 @@ use std::collections::{HashMap, VecDeque};
 
 use crate::sim::SimEvent;
 use crate::sim::boss::Boss;
-use crate::sim::data::Tuning;
+use crate::sim::data::{Class, Tuning};
 use crate::sim::encounter::{self, Encounter, RESPAWN_TICKS, near_checkpoint, near_loot, near_pickup};
 use crate::sim::fighter::{Body, Foe, Health};
 use crate::sim::items::{Item, Loot, QUICK_SLOTS};
@@ -31,6 +31,8 @@ const HP_PX: f32 = 0.51; // px per HP
 const ALLY_HP_PX: f32 = HP_PX * 0.5;
 const ST_PX: f32 = 2.0; // px per stamina point
 const SP_PX: f32 = 0.6; // px per special gauge point
+const MP_PX: f32 = 1.6; // px per mana point
+const MANA: Color = Color::srgb(0.25, 0.42, 0.95);
 const SPECIAL: Color = Color::srgb(0.9, 0.7, 0.25);
 /// Special ready: light yellow stripes scrolling over the gauge (period and speed in px).
 const STRIPE_LIGHT: Color = Color::srgb(1.0, 0.9, 0.45);
@@ -48,6 +50,9 @@ enum Bar {
     StaminaFrame,
     Special,
     SpecialFrame,
+    /// The mage's mana (hidden for a warrior).
+    Mana,
+    ManaFrame,
     /// Bars of the boss shown in this slot (two for a duo).
     BossHp(u8),
     BossStagger(u8),
@@ -149,13 +154,17 @@ impl ItemIcons {
     }
 }
 
-/// Weapon icons, in the order of `weapons.ron`.
+/// Weapon icons, in the order of `weapons.ron`, then those of the mage's spells.
 #[derive(Resource)]
-pub struct WeaponIcons(Vec<Handle<Image>>);
+pub struct WeaponIcons(Vec<Handle<Image>>, Vec<Handle<Image>>);
 
 impl WeaponIcons {
     pub fn get(&self, i: usize) -> Handle<Image> {
         self.0.get(i).cloned().unwrap_or_default()
+    }
+
+    pub fn spell(&self, i: usize) -> Handle<Image> {
+        self.1.get(i).cloned().unwrap_or_default()
     }
 }
 
@@ -476,6 +485,9 @@ fn feather_icon() -> Image {
 /// thin blade and a golden shell guard, the greatsword a wide fullered blade and a long
 /// straight iron guard.
 fn weapon_icon(index: usize) -> Image {
+    if index == 2 {
+        return staff_icon();
+    }
     let k = std::f32::consts::FRAC_1_SQRT_2;
     let rapier = index == 0;
     let steel = |v: f32, w: f32| {
@@ -529,6 +541,91 @@ fn weapon_icon(index: usize) -> Image {
             }
         }
         None
+    })
+}
+
+/// The mage's staff: a diagonal ash shaft, brass rings, three prongs around a pale blue crystal
+/// at the top right.
+fn staff_icon() -> Image {
+    let k = std::f32::consts::FRAC_1_SQRT_2;
+    ps1_icon(ITEM_ICON, true, move |fx, fy| {
+        let (t, v) = ((fx - 2.0 + (22.0 - fy)) * k, (fx - 2.0 - (22.0 - fy)) * -k);
+        let crystal = ((t - 25.5) / 3.2).abs() + (v / 1.9).abs();
+        if crystal < 1.0 {
+            let lit = 0.6 + 0.4 * (v / 1.9) - 0.3 * crystal;
+            return Some(Vec3::new(0.55, 0.72, 1.0).lerp(Vec3::ONE, lit.clamp(0.0, 1.0)));
+        }
+        // Prongs: they curl out from the shaft around the crystal.
+        if (21.0..27.0).contains(&t) {
+            let spread = 1.2 + 1.6 * (1.0 - ((t - 23.5) / 3.5).powi(2)).max(0.0);
+            if (v.abs() - spread).abs() < 0.55 {
+                return Some(Vec3::new(0.4, 0.26, 0.15));
+            }
+        }
+        if (0.5..22.0).contains(&t) && v.abs() < 0.9 {
+            if [5.0, 9.0, 20.5].iter().any(|r| (t - r).abs() < 0.6) {
+                return Some(Vec3::new(0.82, 0.62, 0.26));
+            }
+            let wood = Vec3::new(0.42, 0.29, 0.17) * (0.85 + 0.25 * v);
+            return Some(if t < 2.0 { Vec3::new(0.35, 0.35, 0.38) } else { wood });
+        }
+        None
+    })
+}
+
+/// A spell's icon, in its element's colour: a small bolt (orb trailing sparks), a great lance of
+/// light (a big projectile), or a column of fire bursting from the ground.
+pub fn spell_icon(def: &crate::sim::data::MageSpellDef) -> Image {
+    use crate::sim::data::SpellKind;
+    let s = &def.spell;
+    let (kind, big) = (s.kind, s.radius >= 0.3);
+    let c = Vec3::from(s.element.color());
+    let k = std::f32::consts::FRAC_1_SQRT_2;
+    ps1_icon(ITEM_ICON, true, move |fx, fy| {
+        let dx = fx - 12.0;
+        match kind {
+            SpellKind::Bolt if big => {
+                // A long diamond of light along the diagonal, white core, a halo of sparks.
+                let (t, v) = ((fx - 2.0 + (22.0 - fy)) * k, (fx - 2.0 - (22.0 - fy)) * -k);
+                let half = if t < 18.0 { 3.6 * t / 18.0 } else { 3.6 * (28.0 - t) / 10.0 };
+                if (1.0..28.0).contains(&t) && v.abs() < half.max(0.0) {
+                    let core = 1.0 - v.abs() / half.max(0.1);
+                    return Some(c.lerp(Vec3::ONE, core * core));
+                }
+                if (2.0..16.0).contains(&t) && (v.abs() - half - 1.5).abs() < 0.5 && (t as i32) % 3 == 0 {
+                    return Some(c * 0.8);
+                }
+                None
+            }
+            SpellKind::Bolt => {
+                // Orb at the top right, its trail down to the bottom left.
+                let (ox, oy) = (fx - 15.5, fy - 8.5);
+                let r = (ox * ox + oy * oy).sqrt();
+                if r < 4.2 {
+                    return Some(c.lerp(Vec3::ONE, (1.0 - r / 4.2) * 0.9));
+                }
+                let along = (-ox + oy) * k;
+                let across = (ox + oy) * k;
+                let w = 3.2 * (1.0 - along / 15.0);
+                if (0.0..15.0).contains(&along) && across.abs() < w && ((along * 1.7) as i32 % 3 != 2 || across.abs() < w * 0.4) {
+                    return Some(c * (1.0 - along / 20.0));
+                }
+                None
+            }
+            _ => {
+                // Column narrowing upwards, licking flames, on a cracked ground.
+                if fy > 19.0 && fy < 22.0 && dx.abs() < 10.0 {
+                    return Some(if (fx as i32) % 4 == 0 { c * 0.9 } else { Vec3::new(0.3, 0.25, 0.22) });
+                }
+                let h = 19.0 - fy;
+                let w = 5.0 - h * 0.18 + (fy * 1.3).sin() * 1.0;
+                if (0.0..17.0).contains(&h) && dx.abs() < w {
+                    let core = 1.0 - dx.abs() / w.max(0.1);
+                    return Some(c.lerp(Vec3::new(1.0, 0.95, 0.75), core * 0.85));
+                }
+                None
+            }
+        }
     })
 }
 
@@ -646,7 +743,10 @@ fn setup(mut commands: Commands, tuning: Res<Tuning>, font: Res<UiFont>, mut ima
             })
             .collect(),
     );
-    let weapon_icons = WeaponIcons((0..tuning.weapons.len()).map(|i| images.add(weapon_icon(i))).collect());
+    let weapon_icons = WeaponIcons(
+        (0..tuning.weapons.len()).map(|i| images.add(weapon_icon(i))).collect(),
+        tuning.magic.spells.iter().map(|s| images.add(spell_icon(s))).collect(),
+    );
     let p = &tuning.player;
     commands.spawn((
         font.text("", 1, TEXT),
@@ -719,6 +819,14 @@ fn setup(mut commands: Commands, tuning: Res<Tuning>, font: Res<UiFont>, mut ima
                             ));
                         }
                     });
+            });
+            c.spawn((
+                Node { width: px(tuning.magic.max_mana * MP_PX + 4.0), height: px(9), padding: UiRect::all(px(2)), display: Display::None, ..default() },
+                BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.7)),
+                Bar::ManaFrame,
+            ))
+            .with_children(|c| {
+                c.spawn(bar(0.0, 5.0, MANA, Bar::Mana));
             });
             c.spawn((font.text("", 1, GOLD), Effects));
             // Co-op: the allies' health, then the connection.
@@ -796,7 +904,7 @@ fn setup(mut commands: Commands, tuning: Res<Tuning>, font: Res<UiFont>, mut ima
                 slot_box(c, weapon_icons.0.first().cloned().unwrap_or_default(), None);
                 c.spawn(info()).with_children(|c| {
                     c.spawn(pips()).with_children(|c| {
-                        for i in 0..tuning.weapons.len() as u8 {
+                        for i in 0..tuning.weapons.len().max(tuning.magic.spells.len()) as u8 {
                             c.spawn((Node { width: px(10), height: px(4), ..default() }, BackgroundColor(Color::NONE), WeaponPip(i)));
                         }
                     });
@@ -1129,6 +1237,25 @@ fn update_bars(
             Bar::StaminaFrame => {
                 bg.0 = Color::srgba(0.1 + 0.7 * fx.no_stamina, 0.0, 0.0, 0.7);
             }
+            // No special gauge for a weapon without a special (the staff).
+            Bar::SpecialFrame => {
+                let d = if tuning.weapons.get(p.weapon as usize).is_some_and(|w| w.special.is_some()) { Display::Flex } else { Display::None };
+                if n.display != d {
+                    n.display = d;
+                }
+            }
+            // Mana: only for a mage; the frame flashes red when a spell is refused.
+            Bar::ManaFrame => {
+                bg.0 = Color::srgba(0.1 + 0.7 * fx.no_mana, 0.0, 0.0, 0.7);
+                let d = if p.class == Class::Mage { Display::Flex } else { Display::None };
+                if n.display != d {
+                    n.display = d;
+                }
+            }
+            Bar::Mana => {
+                let affordable = tuning.magic.spells.get(p.spell as usize).is_some_and(|s| p.mana >= s.mana);
+                bg.0 = if affordable { MANA } else { Color::srgb(0.32, 0.36, 0.6) };
+            }
             _ => {}
         }
         n.width = match b {
@@ -1139,6 +1266,8 @@ fn update_bars(
             Bar::StaminaFrame => px(tuning.player.max_stamina * ST_PX + 4.0),
             Bar::Special => px(p.special.max(0.0) * SP_PX),
             Bar::SpecialFrame => px(p.special_max(&tuning) * SP_PX + 4.0),
+            Bar::Mana => px(p.mana.max(0.0) * MP_PX),
+            Bar::ManaFrame => px(tuning.magic.max_mana * MP_PX + 4.0),
             _ => continue,
         };
     }
@@ -1169,25 +1298,39 @@ fn update_weapon(
     mut icon: Query<&mut ImageNode, With<WeaponIcon>>,
     mut name: Query<&mut Text, With<WeaponName>>,
     mut hint: Query<&mut Hint, With<WeaponHint>>,
-    mut pips: Query<(&WeaponPip, &mut BackgroundColor)>,
+    mut pips: Query<(&WeaponPip, &mut BackgroundColor, &mut Node)>,
 ) {
     let Ok(p) = players.single() else { return };
-    let w = p.weapon as usize;
+    let mage = p.class == Class::Mage;
+    // A mage shows the spell ready to be cast (and its cost), a warrior their weapon.
+    let (h, label, slots, current) = if mage {
+        let si = p.spell as usize;
+        let label = tuning.magic.spells.get(si).map(|s| format!("{} ({})", s.name.get(), s.mana as u32)).unwrap_or_default();
+        (icons.spell(si), label, (0..tuning.magic.spells.len() as u8).collect::<Vec<_>>(), p.spell)
+    } else {
+        let w = p.weapon as usize;
+        (icons.get(w), tuning.weapons[w].name.get().to_string(), tuning.class_weapons(p.class).collect(), p.weapon)
+    };
     for mut img in &mut icon {
-        let h = icons.0.get(w).cloned().unwrap_or_default();
         if img.image != h {
-            img.image = h;
+            img.image = h.clone();
         }
     }
     for mut t in &mut name {
-        set_text(&mut t, tuning.weapons[w].name.get());
+        set_text(&mut t, &label);
     }
     let key = if *device == Device::Gamepad { Glyph::DpadRight } else { Glyph::Key("1/2") };
     for mut h in &mut hint {
-        set_hint(&mut h, if tuning.weapons.len() > 1 { vec![i(key), t(tr("switch", "changer"))] } else { vec![] });
+        let what = if mage { tr("spell", "sort") } else { tr("switch", "changer") };
+        set_hint(&mut h, if slots.len() > 1 { vec![i(key), t(what)] } else { vec![] });
     }
-    for (pip, mut bg) in &mut pips {
-        let c = if pip.0 as usize == w { Color::srgb(0.95, 0.85, 0.55) } else { Color::srgba(0.85, 0.82, 0.75, 0.6) };
+    for (pip, mut bg, mut n) in &mut pips {
+        let shown = slots.get(pip.0 as usize);
+        let d = if shown.is_some() { Display::Flex } else { Display::None };
+        if n.display != d {
+            n.display = d;
+        }
+        let c = if shown == Some(&current) { Color::srgb(0.95, 0.85, 0.55) } else { Color::srgba(0.85, 0.82, 0.75, 0.6) };
         if bg.0 != c {
             bg.0 = c;
         }

@@ -3,7 +3,7 @@
 use bevy::prelude::*;
 
 use super::boss::Boss;
-use super::data::{BossMove, MoveRef, PlayerMove, Tuning, WeaponMove};
+use super::data::{BossMove, Class, MoveRef, PlayerMove, Tuning, WeaponMove};
 use super::encounter::{self, Encounter, near_checkpoint, near_loot, near_pickup};
 use super::fighter::{Action, Body, Foe, Health, Hitstop};
 use super::input::{InputBuffer, PlayerInputs, btn};
@@ -37,7 +37,15 @@ pub enum PState {
 pub struct Player {
     pub id: u8,
     pub state: PState,
+    /// Warrior or mage: their weapons, and the mage's spells and mana.
+    pub class: Class,
+    /// Weapon in hand (index in `Tuning::weapons`, one of their class's).
     pub weapon: u8,
+    /// The mage's selected spell (index in `MagicDef::spells`), cast by the light attack.
+    pub spell: u8,
+    /// The mage's mana, and the ticks before it starts coming back after a spell.
+    pub mana: f32,
+    pub mana_delay: u32,
     /// Index of the next light attack in the combo.
     pub combo: u8,
     /// Until this tick, a light attack continues the combo after the previous one ended.
@@ -112,7 +120,11 @@ impl Player {
         Self {
             id,
             state: PState::Free,
+            class: Class::Warrior,
             weapon: 0,
+            spell: 0,
+            mana: t.magic.max_mana,
+            mana_delay: 0,
             combo: 0,
             combo_until: 0,
             stamina: t.player.max_stamina,
@@ -170,6 +182,18 @@ impl Player {
         let brooch = if self.inventory.wears(Item::IronBrooch) { items::BROOCH_DAMAGE } else { 1.0 };
         let ash = if self.ward_ticks > 0 { items::ASH_DAMAGE } else { 1.0 };
         brooch * ash
+    }
+
+    /// Takes on class `c`: its first weapon in hand, mana full.
+    pub fn set_class(&mut self, c: Class, t: &Tuning) {
+        self.class = c;
+        if t.weapons.get(self.weapon as usize).is_none_or(|w| w.class != c) {
+            self.weapon = t.class_weapon(c);
+        }
+        self.spell = self.spell.min(t.magic.spells.len().saturating_sub(1) as u8);
+        self.combo = 0;
+        self.mana = t.magic.max_mana;
+        self.mana_delay = 0;
     }
 
     /// Starts a fall (the body is already above the void; `from`: last position on the ground).
@@ -338,6 +362,7 @@ pub fn player_act(
     let mut it = players.iter_many_mut(&order);
     while let Some((entity, mut p, mut body, mut action, mut hitstop, mut health)) = it.fetch_next() {
         let inp = inputs.0[p.id as usize % inputs.0.len()];
+        let sid = ids.get(entity).map_or(0, |(_, id)| id.0);
         let pressed = p.buffer.update(inp.buttons, now);
         p.guard_held = inp.held(btn::GUARD);
         p.dodge_held = if inp.held(btn::DODGE) { p.dodge_held + 1 } else { 0 };
@@ -469,6 +494,13 @@ pub fn player_act(
                 events.push(SimEvent::ItemCycled { entity });
             }
         }
+        // The mage's spells: "switch weapon" selects the next one, at once.
+        if pressed & btn::SWITCH != 0 && p.class == Class::Mage && !health.dead() {
+            p.buffer.consume(btn::SWITCH);
+            let n = t.magic.spells.len().max(1) as u8;
+            p.spell = (p.spell + 1) % n;
+            events.push(SimEvent::SpellSwitched { entity });
+        }
         if hitstop.0 > 0 {
             hitstop.0 -= 1;
             continue;
@@ -504,7 +536,7 @@ pub fn player_act(
                     MoveRef::Player(PlayerMove::GuardHit | PlayerMove::PerfectGuard)
                 );
                 if p.guard_held {
-                    if matches!(mv, MoveRef::Weapon(..)) {
+                    if matches!(mv, MoveRef::Weapon(..) | MoveRef::Cast(_)) {
                         // Guard held through an attack: the perfect window counts from the press,
                         // so it's long gone unless the press came at the very end.
                         p.guard_start = p.last_guard_press;
@@ -521,13 +553,22 @@ pub fn player_act(
                     && action.tick >= pd.switch_at
                 {
                     p.switched = true;
-                    p.weapon = (p.weapon + 1) % t.weapons.len() as u8;
+                    p.weapon = next_weapon(t, p.class, p.weapon);
                     p.combo = 0;
                     ctx.events.push(SimEvent::WeaponSwitched { entity });
                 }
                 if mv == MoveRef::Player(PlayerMove::Heal) && !p.healed && action.tick >= pd.heal_at {
                     p.healed = true;
                     use_item_effect(&mut p, &mut health, entity, &mut ctx);
+                }
+                // The spell goes off (hit before, its mana was spent for nothing).
+                if let MoveRef::Cast(si) = mv
+                    && t.magic.spells.get(si as usize).is_some_and(|sd| sd.release == action.tick)
+                {
+                    let range = t.magic.spells[si as usize].range;
+                    let aim = spell_target(t, &foes, &order, &p, &body, range);
+                    let volley = sid.rotate_left(16) ^ action.seq ^ 0x8000;
+                    super::magic::release(ctx.commands, t, &body, si, entity, volley, aim, ctx.events);
                 }
                 let can_cancel = action.tick >= def.cancel_tick();
                 let can_chain = action.tick >= def.chain_tick();
@@ -666,8 +707,8 @@ fn try_defensive(p: &mut Player, body: &mut Body, action: &mut Action, ctx: &mut
         ctx.events.push(SimEvent::Dodge { entity: ctx.entity });
         return true;
     }
-    // No guard during an attack: only once it's over (dodge can still cancel it).
-    let attacking = matches!(action.mv, Some(MoveRef::Weapon(..)));
+    // No guard during an attack or a spell: only once it's over (dodge can still cancel it).
+    let attacking = matches!(action.mv, Some(MoveRef::Weapon(..) | MoveRef::Cast(_)));
     if p.guard_held && p.state != PState::Guard && !attacking {
         // Cancelling a guard reaction while still holding: same guard, no new perfect window.
         let from_guard = action.is(MoveRef::Player(PlayerMove::GuardHit))
@@ -716,6 +757,10 @@ fn try_offensive(p: &mut Player, body: &mut Body, action: &mut Action, foes: &mu
                 return true;
             }
         }
+        // The mage's light attack: the selected spell.
+        if wd.light.is_empty() {
+            return try_cast(p, body, action, ctx);
+        }
         let idx = match action.mv {
             Some(MoveRef::Weapon(pw, WeaponMove::Light(i))) if pw == w => i + 1,
             _ if now <= p.combo_until => p.combo,
@@ -733,19 +778,64 @@ fn try_offensive(p: &mut Player, body: &mut Body, action: &mut Action, foes: &mu
         p.combo = 0;
         return true;
     }
-    if p.buffer.buffered(btn::SPECIAL, now, buf) && p.special_ready(t) {
+    if p.buffer.buffered(btn::SPECIAL, now, buf) && p.special_ready(t) && wd.special.is_some() {
         p.buffer.consume(btn::SPECIAL);
         p.special = 0.0;
         start_move(p, body, action, MoveRef::Weapon(w, WeaponMove::Special), ctx);
         return true;
     }
-    if p.buffer.buffered(btn::SWITCH, now, buf) {
+    if p.buffer.buffered(btn::SWITCH, now, buf) && t.class_weapons(p.class).count() > 1 {
         p.buffer.consume(btn::SWITCH);
         p.switched = false;
         start_move(p, body, action, MoveRef::Player(PlayerMove::Switch), ctx);
         return true;
     }
     false
+}
+
+/// The warrior's next weapon (their class's weapons, in turn).
+pub fn next_weapon(t: &Tuning, class: Class, current: u8) -> u8 {
+    let mine: Vec<u8> = t.class_weapons(class).collect();
+    let at = mine.iter().position(|&w| w == current).map_or(0, |i| i + 1);
+    mine.get(at % mine.len().max(1)).copied().unwrap_or(current)
+}
+
+/// The mage casts the selected spell, if they have the mana for it (spent at once).
+fn try_cast(p: &mut Player, body: &mut Body, action: &mut Action, ctx: &mut Ctx) -> bool {
+    let t = ctx.t;
+    let si = p.spell.min(t.magic.spells.len().saturating_sub(1) as u8);
+    let Some(sd) = t.magic.spells.get(si as usize) else { return false };
+    if p.mana < sd.mana {
+        ctx.events.push(SimEvent::NoMana { entity: ctx.entity });
+        return false;
+    }
+    p.mana -= sd.mana;
+    p.mana_delay = t.magic.mana_delay;
+    p.combo = 0;
+    start_move(p, body, action, MoveRef::Cast(si), ctx);
+    ctx.events.push(SimEvent::Casting { entity: ctx.entity, spell: si });
+    true
+}
+
+/// Target of a spell: the locked point (its aim point, and the opponent's feet), otherwise the
+/// nearest living opponent in front within `range`.
+fn spell_target(t: &Tuning, foes: &Foes, order: &[Entity], p: &Player, body: &Body, range: f32) -> Option<super::magic::Aim> {
+    let aim_of = |b: &Body| b.pos + Vec3::Y * (b.height * 0.5).min(1.3);
+    if let Some(e) = p.lock
+        && let Some(point) = lock_pos(t, foes, e, p.lock_part)
+        && let Ok((_, b, ..)) = foes.get(e)
+    {
+        return Some(super::magic::Aim { foe: e, point, feet: b.pos });
+    }
+    foes.iter_many(order)
+        .filter(|(_, b, _, h, _)| {
+            !h.dead()
+                && foe_dist(b, body.pos) <= range
+                && (b.pos.y - body.pos.y).abs() < 4.0
+                && math::wrap(math::yaw_of(b.pos - body.pos) - body.yaw).abs() < 1.0
+        })
+        .min_by(|a, b| foe_dist(a.1, body.pos).total_cmp(&foe_dist(b.1, body.pos)))
+        .map(|(e, b, ..)| super::magic::Aim { foe: e, point: aim_of(b), feet: b.pos })
 }
 
 /// Uses the item in the selected quick slot. Doesn't require stamina.
@@ -828,6 +918,8 @@ fn try_interact(p: &mut Player, body: &mut Body, health: &mut Health, enc: &mut 
     p.regain = 0.0;
     p.regain_timer = 0;
     p.inventory.refill(ctx.t);
+    p.mana = ctx.t.magic.max_mana;
+    p.mana_delay = 0;
     p.lock = None;
     p.vel = Vec3::ZERO;
     p.sprinting = false;
@@ -925,13 +1017,15 @@ fn start_move(p: &mut Player, body: &mut Body, action: &mut Action, mv: MoveRef,
         cost *= items::FEATHER_DODGE;
     }
     p.spend_stamina(cost, ctx.t);
-    if matches!(mv, MoveRef::Weapon(..)) {
-        // Attacks immediately face the locked target or the stick's direction.
+    if matches!(mv, MoveRef::Weapon(..) | MoveRef::Cast(_)) {
+        // Attacks and spells immediately face the locked target or the stick's direction.
         if let Some(tp) = ctx.locked_pos {
             body.yaw = math::yaw_of(tp - body.pos);
         } else if let Some(d) = ctx.move_dir {
             body.yaw = math::yaw_of(d);
         }
+    }
+    if matches!(mv, MoveRef::Weapon(..)) {
         let heavy = matches!(mv, MoveRef::Weapon(_, WeaponMove::Heavy | WeaponMove::HeavyCharged | WeaponMove::Jump));
         ctx.events.push(SimEvent::Swing { entity: ctx.entity, heavy });
     }
@@ -1048,7 +1142,18 @@ fn air_control(p: &mut Player, body: &mut Body, stick_len: f32, move_dir: Option
 /// End-of-tick regenerations and timers.
 pub fn player_end_tick(tuning: Res<Tuning>, mut q: Query<(&mut Player, &Action, &mut Health)>) {
     let pd = &tuning.player;
+    let md = &tuning.magic;
     for (mut p, action, mut health) in &mut q {
+        // A weapon without a special (the staff): no gauge.
+        if tuning.weapons.get(p.weapon as usize).is_some_and(|w| w.special.is_none()) {
+            p.special = 0.0;
+        }
+        // The mage's mana comes back slowly, a while after the last spell.
+        if p.mana_delay > 0 {
+            p.mana_delay -= 1;
+        } else if p.state != PState::Dead && !health.dead() {
+            p.mana = (p.mana + md.mana_regen * DT).min(md.max_mana);
+        }
         let pm = &mut *p;
         for ticks in [&mut pm.resin_ticks, &mut pm.ward_ticks, &mut pm.vigor_ticks] {
             *ticks = ticks.saturating_sub(1);
@@ -1065,7 +1170,7 @@ pub fn player_end_tick(tuning: Res<Tuning>, mut q: Query<(&mut Player, &Action, 
         if p.stamina_delay > 0 {
             p.stamina_delay -= 1;
         } else if !p.sprinting && p.state != PState::Dead {
-            let attacking = matches!(action.mv, Some(MoveRef::Weapon(..)));
+            let attacking = matches!(action.mv, Some(MoveRef::Weapon(..) | MoveRef::Cast(_)));
             if !attacking {
                 let rate = if p.state == PState::Guard {
                     pd.stamina_regen_guarding

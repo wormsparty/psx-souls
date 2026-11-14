@@ -13,7 +13,7 @@ use serde::Deserialize;
 use super::ps1::{Ps1Lighting, Ps1Material, Ps1Swapped, PointLightPs1, TintMeshes, set_tint};
 use super::{AppState, Interp, LocalPlayer};
 use crate::sim::boss::{Boss, unblockable_pending};
-use crate::sim::data::{BossMove, MoveDef, MoveRef, Tuning};
+use crate::sim::data::{BossMove, Class, MoveDef, MoveRef, Tuning};
 use crate::sim::enemy::{EState, Enemy};
 use crate::sim::fighter::{Action, Body, Health, Hitstop, PrevBody};
 use crate::sim::items::Loot;
@@ -22,7 +22,7 @@ use crate::sim::world::Zone;
 use crate::sim::{SimEntity, math};
 
 /// Weapon names, in the order of `weapons.ron` (clip suffix and model name).
-pub const WEAPON_MODELS: [&str; 2] = ["rapier", "greatsword"];
+pub const WEAPON_MODELS: [&str; 3] = ["rapier", "greatsword", "staff"];
 
 /// Enemy models (`EnemyDef::model`) and their animation markers.
 pub const ENEMY_MODELS: [(&str, &str); 2] = [
@@ -219,7 +219,7 @@ impl Plugin for ModelsPlugin {
                     .after(super::interpolate),
             )
             .add_systems(Update, flicker.run_if(not(in_state(AppState::Loading))))
-            .add_systems(PostUpdate, guest_coat)
+            .add_systems(PostUpdate, coat_dye)
             .add_observer(on_scene_ready);
     }
 }
@@ -718,54 +718,113 @@ fn weapon_glow(
     }
 }
 
-/// Co-op: the guests' coat is a light blue (the host's red with its red and blue swapped, then
-/// brightened; grain kept).
-/// Runs once the glTF materials have been converted (`ps1::swap_standard_materials`); the dyed
-/// copy becomes the mesh's base material, the one tints come back to.
-fn guest_coat(
-    mut q: Query<(Entity, &GltfMaterialName, &mut MeshMaterial3d<Ps1Material>, &mut Ps1Swapped), Added<Ps1Swapped>>,
+/// Colour of a player's coat: red for the warrior (light blue for a co-op guest), deep blue for
+/// the mage (green for a guest).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum Dye {
+    Red,
+    Sky,
+    Blue,
+    Green,
+}
+
+impl Dye {
+    fn of(p: &Player) -> Dye {
+        match (p.class, p.id != 0) {
+            (Class::Warrior, false) => Dye::Red,
+            (Class::Warrior, true) => Dye::Sky,
+            (Class::Mage, false) => Dye::Blue,
+            (Class::Mage, true) => Dye::Green,
+        }
+    }
+
+    /// The red coat's texel recoloured (channels swapped, then brightened; grain kept).
+    fn texel(self, [r, g, b, a]: [u8; 4]) -> [u8; 4] {
+        let lift = |v: u8, k: f32| (v as f32 * k).min(255.0) as u8;
+        match self {
+            Dye::Red => [r, g, b, a],
+            Dye::Sky => [lift(b, 2.7), lift(g, 3.6), lift(r, 1.9), a],
+            Dye::Blue => [lift(b, 1.1), lift(g, 1.5), lift(r, 1.35), a],
+            Dye::Green => [lift(b, 1.1), lift(r, 1.15), lift(g, 1.3), a],
+        }
+    }
+
+    fn color(self, c: Vec4) -> Vec4 {
+        match self {
+            Dye::Red => c,
+            Dye::Sky | Dye::Blue => Vec4::new(c.z, c.y, c.x, c.w),
+            Dye::Green => Vec4::new(c.z, c.x, c.y, c.w),
+        }
+    }
+}
+
+/// A coat mesh of the player: its original (red) material, and the dye it wears.
+#[derive(Component)]
+struct Coat {
+    orig: Handle<Ps1Material>,
+    dye: Dye,
+}
+
+/// The coat follows the owner's class and role: the dyed copy becomes the mesh's base material
+/// (the one tints come back to). Runs once the glTF materials have been converted
+/// (`ps1::swap_standard_materials`), and again whenever the class changes (checkpoint).
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+fn coat_dye(
+    mut commands: Commands,
+    added: Query<(Entity, &GltfMaterialName, &Ps1Swapped), (Added<Ps1Swapped>, Without<Coat>)>,
+    mut q: Query<(Entity, &mut Coat, &mut MeshMaterial3d<Ps1Material>, &mut Ps1Swapped)>,
     parents: Query<&ChildOf>,
     scenes: Query<&VisualScene>,
     owners: Query<&Player>,
     mut materials: ResMut<Assets<Ps1Material>>,
     mut images: ResMut<Assets<Image>>,
-    mut dyed: Local<HashMap<AssetId<Ps1Material>, Handle<Ps1Material>>>,
+    mut dyed: Local<HashMap<(AssetId<Ps1Material>, Dye), Handle<Ps1Material>>>,
 ) {
-    for (e, name, mut mat, mut base) in &mut q {
-        if !matches!(name.0.as_str(), "coat" | "coat_dark") {
-            continue;
+    for (e, name, base) in &added {
+        if matches!(name.0.as_str(), "coat" | "coat_dark") {
+            commands.entity(e).insert(Coat { orig: base.0.clone(), dye: Dye::Red });
         }
-        let guest = parents
+    }
+    for (e, mut coat, mut mat, mut base) in &mut q {
+        let Some(want) = parents
             .iter_ancestors(e)
             .find_map(|a| scenes.get(a).ok())
-            .is_some_and(|vs| vs.kind == VisualKind::Player && owners.get(vs.owner).is_ok_and(|p| p.id != 0));
-        if !guest {
+            .filter(|vs| vs.kind == VisualKind::Player)
+            .and_then(|vs| owners.get(vs.owner).ok())
+            .map(Dye::of)
+        else {
+            continue;
+        };
+        if want == coat.dye {
             continue;
         }
-        let handle = match dyed.get(&base.0.id()) {
+        let handle = match dyed.get(&(coat.orig.id(), want)) {
             Some(h) => h.clone(),
+            None if want == Dye::Red => coat.orig.clone(),
             None => {
-                let Some(mut m) = materials.get(&base.0).cloned() else { continue };
-                let c = m.params.base_color;
-                m.params.base_color = Vec4::new(c.z, c.y, c.x, c.w);
+                let Some(mut m) = materials.get(&coat.orig).cloned() else { continue };
+                m.params.base_color = want.color(m.params.base_color);
                 if let Some(tex) = m.texture.as_ref().and_then(|t| images.get(t))
                     && tex.texture_descriptor.format.block_copy_size(None) == Some(4)
                     && let Some(data) = tex.data.as_ref()
                 {
                     let mut copy = tex.clone();
-                    let lift = |v: u8, k: f32| (v as f32 * k).min(255.0) as u8;
-                    copy.data = Some(
-                        data.chunks_exact(4).flat_map(|p| [lift(p[2], 2.7), lift(p[1], 3.6), lift(p[0], 1.9), p[3]]).collect(),
-                    );
+                    copy.data = Some(data.as_chunks::<4>().0.iter().flat_map(|p| want.texel(*p)).collect());
                     m.texture = Some(images.add(copy));
                 }
                 let h = materials.add(m);
-                dyed.insert(base.0.id(), h.clone());
+                dyed.insert((coat.orig.id(), want), h.clone());
                 h
             }
         };
-        mat.0 = handle.clone();
+        // Not in the middle of a tint (hit flash): the mesh shows the new base right away.
+        if mat.0.id() == base.0.id() {
+            mat.0 = handle.clone();
+        }
         base.0 = handle;
+        coat.dye = want;
+        // A tint's own copy was made from the old colour.
+        commands.entity(e).remove::<super::ps1::OwnMaterial>();
     }
 }
 

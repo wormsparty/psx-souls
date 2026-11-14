@@ -16,6 +16,7 @@ pub mod enemy;
 pub mod fighter;
 pub mod input;
 pub mod items;
+pub mod magic;
 pub mod math;
 pub mod player;
 pub mod rng;
@@ -86,6 +87,14 @@ pub enum SimEvent {
     /// is defeated (the others fought on).
     Revived { entity: Entity },
     WeaponSwitched { entity: Entity },
+    /// The mage selected another spell, starts casting one (`MagicDef::spells`), lacks the mana.
+    SpellSwitched { entity: Entity },
+    Casting { entity: Entity, spell: u8 },
+    NoMana { entity: Entity },
+    /// A spell being cast was interrupted by a blow (its mana is lost).
+    CastBroken { entity: Entity },
+    /// A player took on another class (at a checkpoint).
+    ClassChanged { entity: Entity },
     Heal { entity: Entity },
     /// Action refused for lack of stamina (visual feedback on the bar).
     NoStamina { entity: Entity },
@@ -240,7 +249,7 @@ impl Plugin for SimPlugin {
             (reset_fight, encounter::input_commands, encounter::apply_commands, begin_tick).chain().in_set(SimSet::Begin),
             (player::player_act, boss::boss_act, enemy::enemy_act).chain().in_set(SimSet::Act),
             combat::separate_bodies.in_set(SimSet::Physics),
-            (combat::resolve_hits, spell::spell_tick).chain().in_set(SimSet::Combat),
+            (combat::resolve_hits, spell::spell_tick, magic::ally_spell_tick).chain().in_set(SimSet::Combat),
             (
                 player::player_end_tick,
                 boss::boss_end_tick,
@@ -333,6 +342,9 @@ pub fn spawn_fight(commands: &mut Commands, t: &Tuning, players: u8, progress: &
         let me = id.checked_sub(1).and_then(|g| guests.get(g as usize)).unwrap_or(progress);
         let mut p = player::Player::new(id, t);
         p.weapon = me.weapon.min(t.weapons.len().saturating_sub(1) as u8);
+        p.spell = me.spell;
+        // An old save (or a weapon of another class): their class's first weapon.
+        p.set_class(me.class, t);
         p.inventory = me.inventory.clone();
         // An old save's selected item may no longer exist.
         if p.inventory.active_item().is_none() {
@@ -439,6 +451,7 @@ pub fn state_hash(world: &mut World) -> u64 {
             p.regain.to_bits().hash(&mut h);
             p.special.to_bits().hash(&mut h);
             p.inventory.hash(&mut h);
+            (p.class, p.weapon, p.spell, p.mana.to_bits(), p.mana_delay).hash(&mut h);
             (p.picked, p.slain, p.felled, p.found, p.checkpoint).hash(&mut h);
             (p.ward_ticks, p.vigor_ticks).hash(&mut h);
             (p.airborne, p.air_vy.to_bits(), p.zone).hash(&mut h);

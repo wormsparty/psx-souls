@@ -26,11 +26,18 @@ fn main() {
     }
     for w in &t.weapons {
         let mut all: Vec<&MoveDef> = w.light.iter().collect();
-        all.extend([&w.heavy, &w.heavy_charged, &w.special, &w.fatal, &w.jump]);
+        all.extend([&w.heavy, &w.heavy_charged, &w.fatal, &w.jump]);
+        all.extend(&w.special);
         for d in all {
             player.insert(d.anim.clone(), mv(d));
         }
         player.insert(w.charge_anim.clone(), json!({"total": w.charge_ticks, "hits": [], "motion": []}));
+    }
+    // The mage's spells: the casting, and the tick at which it goes off ("c0" in the scripts).
+    for s in &t.magic.spells {
+        let mut v = mv(&s.cast);
+        v["casts"] = json!([s.release]);
+        player.insert(s.cast.anim.clone(), v);
     }
     let mut boss = Map::new();
     let b = &t.bosses[0];

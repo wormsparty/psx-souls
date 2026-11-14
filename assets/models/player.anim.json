@@ -7,6 +7,22 @@
    22
   ]
  },
+ "cast_bolt": {
+  "frames": 52.0,
+  "loop": false,
+  "marks": [
+   0,
+   52
+  ]
+ },
+ "cast_lance": {
+  "frames": 92.0,
+  "loop": false,
+  "marks": [
+   0,
+   92
+  ]
+ },
  "death": {
   "frames": 90.0,
   "loop": false,
@@ -183,6 +199,14 @@
    120.0
   ]
  },
+ "idle_staff": {
+  "frames": 120.0,
+  "loop": true,
+  "marks": [
+   0,
+   120.0
+  ]
+ },
  "jump": {
   "frames": 34.0,
   "loop": false,
@@ -317,6 +341,54 @@
   "marks": [
    0,
    30.0
+  ]
+ },
+ "staff_charge": {
+  "frames": 40.0,
+  "loop": false,
+  "marks": [
+   0,
+   40
+  ]
+ },
+ "staff_fatal": {
+  "frames": 96.0,
+  "loop": false,
+  "marks": [
+   0,
+   46,
+   48,
+   96
+  ]
+ },
+ "staff_heavy": {
+  "frames": 42.0,
+  "loop": false,
+  "marks": [
+   0,
+   13,
+   18,
+   42
+  ]
+ },
+ "staff_heavy_charged": {
+  "frames": 56.0,
+  "loop": false,
+  "marks": [
+   0,
+   16,
+   21,
+   56
+  ]
+ },
+ "staff_jump": {
+  "frames": 40.0,
+  "loop": false,
+  "marks": [
+   0,
+   8,
+   14,
+   40
   ]
  },
  "summon": {

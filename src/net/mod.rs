@@ -45,7 +45,7 @@ use crate::sim::snapshot::{self, Snapshot};
 use crate::sim::{NextSimId, ResetFight, SimDebug, SimEvents, SimTick, rng::SimRng, run_sim_tick, stable_hash, state_hash};
 
 /// Protocol version: peers of different versions refuse each other.
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 /// Signaling server by default: the public one of matchbox's author (no guarantee it stays up).
 /// `SOULS_LOBBY` (native) or `?lobby=` (web) to change it (`tools/lobby.sh` for one's own),
 /// `SOULS_ROOM` / `?room=` for the room.

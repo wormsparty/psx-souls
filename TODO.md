@@ -1,7 +1,6 @@
 # TODO
 
 - more weapons?
-- classes?
-- spells?
+- more classes / spells?
 - leveling / souls?
 - level editor?

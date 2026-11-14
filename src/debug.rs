@@ -187,7 +187,13 @@ impl Plugin for AutoShotPlugin {
         if std::env::var("SOULS_TITLE").is_err() {
             app.add_systems(OnEnter(AppState::Title), (|mut commands: Commands| {
                 commands.queue(|w: &mut World| {
-                    crate::menu::launch(w, crate::menu::Launch::New);
+                    // The class: SOULS_CLASS=mage (otherwise the warrior).
+                    let class = if std::env::var("SOULS_CLASS").is_ok_and(|c| c == "mage") {
+                        crate::sim::data::Class::Mage
+                    } else {
+                        crate::sim::data::Class::Warrior
+                    };
+                    crate::menu::launch(w, crate::menu::Launch::New(class));
                     // Optional starting position: SOULS_START=x,z[,yaw in degrees].
                     let start = std::env::var("SOULS_START").ok().map(|s| {
                         s.split(',').filter_map(|p| p.trim().parse().ok()).collect::<Vec<f32>>()
@@ -344,6 +350,8 @@ fn autoshot(
             "revive" => Page::Revive,
             "language" => Page::Language,
             "style" => Page::Style,
+            "class" => Page::Class(true),
+            "newclass" => Page::Class(false),
             _ => Page::Pause,
         });
     }

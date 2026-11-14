@@ -220,6 +220,8 @@ fn latch_presses(
     menu: Res<MenuState>,
     players: Query<(&Player, &Action), With<LocalPlayer>>,
     mut flick: Local<Flick>,
+    mut commands: Commands,
+    tuning: Res<crate::sim::data::Tuning>,
 ) {
     if menu.open {
         // Menu keys must not leak into the game when it closes.
@@ -235,7 +237,16 @@ fn latch_presses(
 
     // Keyboard: 1 / 2 pick the weapon directly (the gamepad cycles). The sim only knows
     // "switch": it's sent if the weapon wanted isn't already the one in hand (or being drawn).
-    if let Ok((p, action)) = players.single() {
+    // A mage's 1 / 2 select the spell directly (a command: the buttons are all taken).
+    if let Ok((p, _)) = players.single()
+        && p.class == crate::sim::data::Class::Mage
+    {
+        let wanted = [KeyCode::Digit1, KeyCode::Digit2, KeyCode::Digit3].iter().take(tuning.magic.spells.len()).position(|k| keys.just_pressed(*k));
+        if let Some(spell) = wanted.map(|w| w as u8).filter(|&w| w != p.spell) {
+            let cmd = crate::sim::encounter::SimCommand::Attune { player: p.id, spell };
+            commands.queue(move |w: &mut World| crate::net::send_command(w, cmd));
+        }
+    } else if let Ok((p, action)) = players.single() {
         let wanted = [KeyCode::Digit1, KeyCode::Digit2].iter().position(|k| keys.just_pressed(*k));
         let drawing = action.mv == Some(MoveRef::Player(PlayerMove::Switch)) && !p.switched;
         let next = if drawing { p.weapon ^ 1 } else { p.weapon };

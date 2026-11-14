@@ -2,12 +2,13 @@
 
 use bevy::prelude::*;
 use psx_souls::sim::boss::Boss;
-use psx_souls::sim::data::{BossMove, MoveRef, PlayerMove, Shape, Tuning, WeaponMove};
+use psx_souls::sim::data::{BossMove, Class, MoveRef, PlayerMove, Shape, Tuning, WeaponMove};
 use psx_souls::sim::encounter::{self, Encounter, Progress, SimCommand, SimCommands, checkpoint_pos, checkpoint_spawn};
 use psx_souls::sim::items::{Item, Loot};
 use psx_souls::sim::fighter::{Action, Body, Health};
 use psx_souls::sim::input::{PlayerInput, PlayerInputs, btn};
 use psx_souls::sim::player::{PState, Player};
+use psx_souls::sim::spell::Spell;
 use psx_souls::sim::world::Zone;
 use psx_souls::sim::{ResetFight, SimDebug, SimEvent, SimEvents, SimPlugin, SimSchedule, math, state_hash};
 
@@ -56,6 +57,15 @@ fn encounter_app(choice: u8) -> App {
     app.world_mut().resource_mut::<ResetFight>().progress = Some(Progress { arena: Some(choice), ..Progress::new_game(&t) });
     steps(&mut app, 3, IDLE); // spawn, the bosses, they wake up
     assert!(app.world().resource::<Encounter>().active);
+    app
+}
+
+/// `new_app`, the player being a mage.
+fn mage_app() -> App {
+    let mut app = new_app();
+    let t = tuning(&app);
+    let p = player(&mut app);
+    app.world_mut().get_mut::<Player>(p).unwrap().set_class(Class::Mage, &t);
     app
 }
 
@@ -1812,4 +1822,177 @@ fn stuck_chasers_give_up_and_let_the_player_rest() {
     assert!(app.world().resource::<Encounter>().hunted);
     steps(&mut app, 600, IDLE);
     assert!(!app.world().resource::<Encounter>().hunted);
+}
+
+/// Places the (passive) boss `dist` metres in front of the player, facing each other.
+fn face_boss(app: &mut App, dist: f32) {
+    let (p, b) = (player(app), boss(app));
+    {
+        let mut bb = app.world_mut().get_mut::<Body>(b).unwrap();
+        bb.pos = Vec3::ZERO;
+        bb.yaw = 0.0;
+    }
+    let mut pb = app.world_mut().get_mut::<Body>(p).unwrap();
+    pb.pos = Vec3::new(0.0, 0.0, dist);
+    pb.yaw = std::f32::consts::PI;
+}
+
+const CAST: PlayerInput = PlayerInput { buttons: btn::LIGHT, ..IDLE };
+
+#[test]
+fn the_mage_casts_spells_with_mana() {
+    let mut app = mage_app();
+    let t = tuning(&app);
+    let (p, b) = (player(&mut app), boss(&mut app));
+    let pl = app.world().get::<Player>(p).unwrap().clone();
+    assert_eq!((pl.class, t.weapons[pl.weapon as usize].class, pl.mana), (Class::Mage, Class::Mage, t.magic.max_mana));
+    // Arcane bolt from afar: it flies and hits the boss.
+    face_boss(&mut app, 12.0);
+    let before = hp(&mut app, b);
+    step(&mut app, CAST);
+    assert!(app.world().get::<Action>(p).unwrap().is(MoveRef::Cast(0)));
+    assert_eq!(app.world().get::<Player>(p).unwrap().mana, t.magic.max_mana - t.magic.spells[0].mana);
+    steps(&mut app, 60, IDLE);
+    let dealt = before - hp(&mut app, b);
+    assert!(dealt > 0.0 && dealt <= t.magic.spells[0].spell.damage + 0.01, "{dealt}");
+    // The mage has no special: no gauge.
+    assert_eq!(app.world().get::<Player>(p).unwrap().special, 0.0);
+}
+
+#[test]
+fn the_arcane_lance_hits_hard_and_staggers() {
+    let mut app = mage_app();
+    let t = tuning(&app);
+    let (p, b) = (player(&mut app), boss(&mut app));
+    face_boss(&mut app, 12.0);
+    app.world_mut().get_mut::<Player>(p).unwrap().spell = 1;
+    let before = hp(&mut app, b);
+    step(&mut app, CAST);
+    let sd = &t.magic.spells[1];
+    assert_eq!(app.world().get::<Player>(p).unwrap().mana, t.magic.max_mana - sd.mana);
+    // Nothing before the release.
+    steps(&mut app, sd.release - 2, IDLE);
+    assert_eq!(hp(&mut app, b), before);
+    steps(&mut app, 40, IDLE);
+    let dealt = before - hp(&mut app, b);
+    assert!((dealt - sd.spell.damage).abs() < 0.01, "{dealt}");
+    // Stronger than the bolt, and dearer.
+    let bolt = &t.magic.spells[0];
+    assert!(sd.spell.damage > 2.5 * bolt.spell.damage && sd.mana > bolt.mana && sd.release > bolt.release);
+}
+
+#[test]
+fn without_mana_nothing_is_cast() {
+    let mut app = mage_app();
+    let p = player(&mut app);
+    app.world_mut().get_mut::<Player>(p).unwrap().mana = 3.0;
+    events(&mut app);
+    step(&mut app, CAST);
+    assert!(app.world().get::<Action>(p).unwrap().mv.is_none());
+    assert!(events(&mut app).iter().any(|e| matches!(e, SimEvent::NoMana { .. })));
+}
+
+#[test]
+fn mana_comes_back_only_over_time() {
+    let mut app = mage_app();
+    let t = tuning(&app);
+    let p = player(&mut app);
+    app.world_mut().get_mut::<Player>(p).unwrap().mana = 0.0;
+    steps(&mut app, 60, IDLE);
+    let one_s = app.world().get::<Player>(p).unwrap().mana;
+    assert!((one_s - t.magic.mana_regen).abs() < 0.05, "{one_s}");
+    // A staff blow (heavy attack) gives none back (only the regeneration of its duration), and
+    // the mage has no special gauge.
+    face_boss(&mut app, 2.4);
+    let b = boss(&mut app);
+    let (before, hp_before) = (app.world().get::<Player>(p).unwrap().mana, hp(&mut app, b));
+    step(&mut app, PlayerInput { buttons: btn::HEAVY, ..IDLE });
+    steps(&mut app, 50, IDLE);
+    assert!(hp(&mut app, b) < hp_before);
+    let gained = app.world().get::<Player>(p).unwrap().mana - before;
+    assert!(gained <= t.magic.mana_regen * 51.0 / 60.0 + 0.01, "{gained}");
+    assert_eq!(app.world().get::<Player>(p).unwrap().special, 0.0);
+}
+
+#[test]
+fn a_blow_breaks_the_spell_being_cast() {
+    let mut app = mage_app();
+    let t = tuning(&app);
+    let p = player(&mut app);
+    // The lance is being gathered when the boss's blow lands: no lance, the mana is lost.
+    app.world_mut().get_mut::<Player>(p).unwrap().spell = 1;
+    let sd = &t.magic.spells[1];
+    let hit_start = boss_attack(&mut app, "ecrasement", 2.6);
+    assert!(hit_start > 10);
+    steps(&mut app, hit_start - 10, IDLE);
+    step(&mut app, CAST);
+    assert!(app.world().get::<Action>(p).unwrap().is(MoveRef::Cast(1)));
+    let mut broken = false;
+    for _ in 0..sd.release + 10 {
+        step(&mut app, IDLE);
+        broken |= events(&mut app).iter().any(|e| matches!(e, SimEvent::CastBroken { .. }));
+    }
+    assert!(broken);
+    assert_eq!(app.world_mut().query::<&Spell>().iter(app.world()).count(), 0);
+    let pl = app.world().get::<Player>(p).unwrap();
+    assert!(pl.mana < t.magic.max_mana - sd.mana + 1.0, "{}", pl.mana);
+}
+
+#[test]
+fn switching_selects_the_next_spell() {
+    let mut app = mage_app();
+    let p = player(&mut app);
+    step(&mut app, PlayerInput { buttons: btn::SWITCH, ..IDLE });
+    step(&mut app, IDLE);
+    assert_eq!(app.world().get::<Player>(p).unwrap().spell, 1);
+    // The staff stays in hand.
+    let t = tuning(&app);
+    assert_eq!(t.weapons[app.world().get::<Player>(p).unwrap().weapon as usize].class, Class::Mage);
+    // Keyboard: a spell chosen directly (one that doesn't exist: ignored).
+    app.world_mut().resource_mut::<SimCommands>().0.push(SimCommand::Attune { player: 0, spell: 0 });
+    step(&mut app, IDLE);
+    assert_eq!(app.world().get::<Player>(p).unwrap().spell, 0);
+    app.world_mut().resource_mut::<SimCommands>().0.push(SimCommand::Attune { player: 0, spell: 7 });
+    step(&mut app, IDLE);
+    assert_eq!(app.world().get::<Player>(p).unwrap().spell, 0);
+}
+
+#[test]
+fn the_class_is_changed_at_a_checkpoint_and_saved() {
+    let mut app = fresh_app();
+    let t = tuning(&app);
+    let p = player(&mut app);
+    // Away from the brazier: refused.
+    app.world_mut().get_mut::<Body>(p).unwrap().pos.x += 6.0;
+    app.world_mut().resource_mut::<SimCommands>().0.push(SimCommand::SetClass { player: 0, class: Class::Mage });
+    step(&mut app, IDLE);
+    assert_eq!(app.world().get::<Player>(p).unwrap().class, Class::Warrior);
+    app.world_mut().get_mut::<Body>(p).unwrap().pos.x -= 6.0;
+    app.world_mut().resource_mut::<SimCommands>().0.push(SimCommand::SetClass { player: 0, class: Class::Mage });
+    step(&mut app, IDLE);
+    let pl = app.world().get::<Player>(p).unwrap().clone();
+    assert_eq!((pl.class, pl.weapon), (Class::Mage, t.class_weapon(Class::Mage)));
+    let (b, h) = (*app.world().get::<Body>(p).unwrap(), *app.world().get::<Health>(p).unwrap());
+    let progress = Progress::of_player(&pl, &b, &h, &Encounter::default(), &t);
+    assert_eq!(progress.class, Class::Mage);
+    // Resting refills the mana.
+    app.world_mut().get_mut::<Player>(p).unwrap().mana = 1.0;
+    step(&mut app, PlayerInput { buttons: btn::INTERACT, ..IDLE });
+    assert_eq!(app.world().get::<Player>(p).unwrap().mana, t.magic.max_mana);
+}
+
+/// A mage plays the scripted fight: the same inputs give the same game.
+#[test]
+fn a_mage_fight_is_deterministic() {
+    let run = || {
+        let mut app = mage_app();
+        app.world_mut().resource_mut::<SimDebug>().boss_passive = false;
+        let mut hashes = 0u64;
+        for i in 0..2000 {
+            step(&mut app, scripted_input(i));
+            hashes = hashes.rotate_left(5) ^ state_hash(app.world_mut());
+        }
+        hashes
+    };
+    assert_eq!(run(), run());
 }

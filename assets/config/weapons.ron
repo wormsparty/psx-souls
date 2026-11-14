@@ -1,4 +1,5 @@
-// Weapon movesets. Local frame: x = right, y = up, z = forward.
+// Weapon movesets (the warrior's rapier and greatsword, the mage's staff) and the mage's spells.
+// Local frame: x = right, y = up, z = forward.
 // Stamina: without an explicit `stamina`, an attack costs its total damage × `stamina_per_damage`
 // (player.ron): for equal damage, rapier and greatsword cost the same.
 // `arc: (start, end)` rotates the capsule around the vertical axis (positive = to the left).
@@ -186,5 +187,94 @@
                         capsule: (a: (0.0, 1.5, 0.6), b: (0.0, 0.3, 3.0), r: 0.3))],
             ),
         ),
+        // ------------------------------------------------------------------ Staff (mage)
+        // The mage's light attack casts the selected spell (`magic`, below): the staff itself only
+        // strikes with the heavy attack. No special attack.
+        (
+            name: (en: "Ashwood staff", fr: "Bâton de frêne"),
+            description: (en: "Casts the mage's spells. Up close, wide and heavy swings.",
+                          fr: "Lance les sorts du magicien. Au corps à corps, des coups larges et lourds."),
+            class: Mage,
+            heavy: (
+                anim: "staff_heavy", total: 42,
+                track_until: 12, track_rate: 420,
+                chain_from: 30, cancel_from: 26,
+                motion: [(start: 6, end: 14, speed: 2.4)],
+                hits: [(start: 13, end: 18, damage: 58, stagger: 7, hitstop: 4,
+                        arc: (55, -55),
+                        capsule: (a: (0.0, 1.2, 0.4), b: (0.0, 1.1, 1.9), r: 0.18))],
+            ),
+            heavy_charged: (
+                anim: "staff_heavy_charged", total: 56,
+                track_until: 8, track_rate: 360,
+                chain_from: 40, cancel_from: 36,
+                hyperarmor: (0, 20),
+                motion: [(start: 4, end: 14, speed: 3.0)],
+                hits: [(start: 16, end: 21, damage: 120, stagger: 30, hitstop: 7,
+                        capsule: (a: (0.0, 1.0, 0.5), b: (0.0, 0.3, 2.1), r: 0.24))],
+            ),
+            charge_ticks: 40,
+            charge_anim: "staff_charge",
+            fatal: (
+                anim: "staff_fatal", total: 96, stamina: 0,
+                iframes: (0, 96),
+                hits: [(start: 46, end: 48, damage: 240, hitstop: 10,
+                        capsule: (a: (0.0, 1.2, 0.3), b: (0.0, 1.4, 2.2), r: 0.35))],
+            ),
+            // Jump attack: the staff brought down two-handed.
+            jump: (
+                anim: "staff_jump", total: 40, stamina: 8,
+                chain_from: 28, cancel_from: 26,
+                hits: [(start: 8, end: 14, damage: 90, stagger: 14, hitstop: 5,
+                        capsule: (a: (0.0, 1.4, 0.4), b: (0.0, 0.4, 1.9), r: 0.22))],
+            ),
+        ),
     ],
+    // The mage's magic. Mana: refilled at the checkpoints (and on respawn, after a victory),
+    // otherwise it only comes back over time (2/s, once `mana_delay` ticks have passed since the
+    // last spell): striking doesn't give any back. A spell is gathered before it goes off
+    // (`release`): a blow taken meanwhile breaks it, and its mana is lost — so it's cast from a
+    // safe spot, in the boss's openings. In exchange each spell hits hard (~9-10 damage per
+    // mana): over a 3-minute fight the mana pays for ~4000 damage, the staff (riskier, up close)
+    // has to do the rest.
+    magic: (
+        max_mana: 100,
+        mana_regen: 2.0,
+        mana_delay: 90,
+        spells: [
+            // Arcane bolt: gathered for half a second, it homes in slightly on its target.
+            // ~8.5 damage per mana: five per bar.
+            (
+                name: (en: "Arcane bolt", fr: "Trait arcanique"),
+                description: (en: "A bolt of pale light that homes in on its target. Gathered for half a second: a blow breaks it, and the mana is lost.",
+                              fr: "Un trait de lumière pâle qui file vers sa cible. Rassemblé pendant une demi-seconde : un coup l'interrompt, et le mana est perdu."),
+                mana: 20,
+                release: 30,
+                from: (0.25, 1.55, 0.9),
+                range: 22,
+                cast: (anim: "cast_bolt", total: 52, stamina: 12,
+                       track_until: 28, track_rate: 600,
+                       chain_from: 46, cancel_from: 40),
+                spell: (name: "arcane_bolt", kind: Bolt, element: Arcane, damage: 170, stagger: 8, radius: 0.22,
+                        hitstop: 3, speed: 20, homing: 80, life: 66),
+            ),
+            // Arcane lance: the bolt's big brother. More than a second to gather (a real opening
+            // is needed), half the bar, but it hits three times as hard and staggers.
+            // ~10.4 damage per mana.
+            (
+                name: (en: "Arcane lance", fr: "Lance arcanique"),
+                description: (en: "A great lance of light, three times as strong as the bolt, and it staggers. More than a second to gather: only in a real opening.",
+                              fr: "Une grande lance de lumière, trois fois plus forte que le trait, et elle ébranle. Plus d'une seconde pour la rassembler : seulement dans une vraie ouverture."),
+                mana: 50,
+                release: 66,
+                from: (0.25, 1.55, 0.9),
+                range: 22,
+                cast: (anim: "cast_lance", total: 92, stamina: 20,
+                       track_until: 62, track_rate: 420,
+                       chain_from: 84, cancel_from: 78),
+                spell: (name: "arcane_lance", kind: Bolt, element: Arcane, damage: 520, stagger: 40, radius: 0.4,
+                        hitstop: 8, speed: 26, homing: 40, life: 60),
+            ),
+        ],
+    ),
 )

@@ -31,7 +31,8 @@ and nothing but your own skill to rely on.
   synthesised sound effects, a hand-made bitmap font
 - **Languages**: English and French
 
-One player (or two online), two weapons (rapier and greatsword), seven bosses. From the
+One player (or two online), two classes — the warrior (rapier and greatsword) and the mage
+(a staff and two spells) — seven bosses. From the
 Lamplighters' Square (first checkpoint), hanging above the void, a long path of bridges and
 platforms, guarded by dogs and puppets, leads to the second checkpoint and to a great door.
 Along the way, a corridor per boss ends in a fog, a torch in the boss's colour in front of it:
@@ -133,6 +134,7 @@ settings: to keep them apart, give each one its own `XDG_CONFIG_HOME` (Linux).
 | Lock on | R3 | Q or middle click |
 | Switch target (locked on): next point to the left / right, higher / lower (a large boss's head) | right stick ← → ↑ ↓ | mouse ← → ↑ ↓ |
 | Switch weapon | D-pad → (cycles) | 1 (rapier) / 2 (greatsword) |
+| Mage: choose the spell (light attack casts it) | D-pad → (cycles) | 1 / 2 |
 | Jump attack (more damage, the jump's stamina almost covers it) | RB / RT in the air | click in the air |
 | Use the selected item | X / □ | R |
 | Next item (quick slots) | D-pad ↓ | ↓ |
@@ -162,14 +164,16 @@ F3, F4 and F5 change the simulation: they're off in co-op.
 - **Title screen**: the centred title, on a background of embers and ash rising above the glow
   of a brazier. With a save, the final door's medallions under the title, lit in their colour
   for the defeated bosses. Continue, New game (asks for
-  confirmation if a save exists), Options, Quit. Next to the title, a *Fork me* badge (GitHub logo on a ribbon) opens the
+  confirmation if a save exists, then the class: warrior or mage, with their portraits
+  `assets/ui/class_<name>.png` rendered by `tools/blender/class_icons.py`), Options, Quit. Next to the title, a *Fork me* badge (GitHub logo on a ribbon) opens the
   project page when clicked (mouse only).
 - **Pause** (Esc / Start): three icons, Equipment (helm), Status (scroll: hit points,
   stamina, attack of the weapon in hand, damage reduction, healing flasks) and System
   (cogwheel: Options, Help, Return to title screen, Quit). Esc / (B) closes the menu. While paused,
   characters and spells are frozen; particles keep going.
 - **Checkpoint** (when resting there): Leave (selected by default), Travel (to another brazier
-  already kindled, with a view of the place), Equipment, Kindle a beacon / Heed a beacon (see
+  already kindled, with a view of the place), Equipment, Change class (items and progress are
+  kept), Kindle a beacon / Heed a beacon (see
   *Online co-op*; in a co-op game: Leave the co-op).
 - **Rekindle the torch** (interacting with the extinguished torch of a defeated boss): the
   boss's portrait (`assets/ui/boss_<n>.png`, rendered by `tools/blender/boss_icons.py`);
@@ -279,6 +283,18 @@ Spells, shockwaves and circles are all in the boss's colour (except the cleaver,
 - **Greatsword**: slow and heavy, long reach, hyper armour during swings; 3 wide cuts;
   vertical heavy; special *Stance* (high guard with hyper armour: a hit taken during the
   stance triggers a riposte).
+- **Mage** (class chosen for a new game, changed at a checkpoint), in a blue coat (green for a
+  co-op guest; a warrior guest wears light blue): the light attack casts the selected spell
+  (1/2, D-pad → cycles), the heavy attack is a staff blow (chargeable). No special attack.
+  Each spell is **gathered** first (sparks rise from the crystal): a blow taken meanwhile breaks
+  it and its mana is lost — cast from a safe spot, in the boss's openings. Two spells:
+  - *Arcane bolt* (20 mana, 0.5 s to gather): a homing projectile, 170 damage;
+  - *Arcane lance* (50 mana, 1.1 s): a great lance of light, 520 damage and heavy stagger.
+
+  **Mana** (blue bar under stamina): 100, coming back only over time (2/s, after 1.5 s without
+  casting), refilled at the checkpoint and after a victory; striking gives none back. About
+  9-10 damage per mana: over a 3-minute fight the mana pays for ~4000 damage, the staff blows
+  (riskier, up close) do the rest.
 - **Stamina**: at least 1 point is needed to attack, dodge or use the special; an action can
   make stamina go negative (down to -60), you then have to wait. An attack's cost = its
   damage × `stamina_per_damage`: for equal damage, the same cost for both weapons.
@@ -287,7 +303,8 @@ Spells, shockwaves and circles are all in the boss's colour (except the cleaver,
 - **Special gauge** (gold bar under stamina): fills up by hitting and perfect guarding; each
   special attack uses a third of it. Special attack hits don't recharge the gauge, and its
   stamina cost is fixed (not proportional to its heavy damage).
-- **HUD**: bottom left, the equipped weapon (icon; D-pad → / 1-2 to switch) above the selected
+- **HUD**: bottom left, the equipped weapon (icon; D-pad → / 1-2 to switch; for the mage, the
+  selected spell and its cost; the mage has no special gauge) above the selected
   quick item. At the bottom, during a fight, the boss's health bar, in its colour (that of its
   torch, its spells and its medallion).
 - **Boss**: 9 attacks in phase 1 (including one rage attack and two area attacks), 2 more in
@@ -417,6 +434,7 @@ src/sim/      deterministic simulation at 60 Hz (no dependency on rendering)
   boss.rs       boss AI (multiplayer aggro, weighted choice, cooldowns, phases, duos,
                 lockable points of large bosses)
   spell.rs      boss spells: projectiles, eruptions announced on the ground
+  magic.rs      the mage's spells (same Spell entities, cast by a player: `Spell::ally`)
   enemy.rs      path enemy AI (post, group alert, chase, giving up)
   world.rs      walkable floors and heights (level, arenas), walled or open edges (falling),
                 galleries (jumping down), obstacles
@@ -459,7 +477,7 @@ whose entities are deliberately stored in different orders must stay identical.
 ## Regenerating the assets
 
 ```sh
-tools/build_assets.sh   # timings and level → Blender (player, boss, weapons, dog, puppet, scenery) → sound effects → font
+tools/build_assets.sh   # timings and level → Blender (player, boss, weapons, dog, puppet, portraits, scenery) → sound effects → font
 ```
 
 The `.blend` files are written to `tools/blender/blend/` for manual touch-ups (not versioned:

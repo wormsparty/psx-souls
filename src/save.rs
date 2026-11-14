@@ -166,6 +166,8 @@ pub fn guest_progress(base: &Progress, coop: &Progress) -> Progress {
     Progress {
         defeated: base.defeated | coop.defeated,
         weapon: coop.weapon,
+        class: coop.class,
+        spell: coop.spell,
         inventory: coop.inventory.clone(),
         found: base.found | coop.found,
         picked: base.picked | coop.picked,

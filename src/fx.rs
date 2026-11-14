@@ -141,8 +141,9 @@ impl Particle {
 pub struct FxState {
     pub perfect_flash: f32,
     pub fury_flash: f32,
-    /// Stamina bar blinking when an action is refused.
+    /// Stamina bar blinking when an action is refused, mana bar when a spell is.
     pub no_stamina: f32,
+    pub no_mana: f32,
     pub last: Vec<SimEvent>,
 }
 
@@ -154,7 +155,7 @@ impl Plugin for FxPlugin {
             .add_systems(Startup, setup)
             .add_systems(
                 Update,
-                (consume_events, update_particles, aoe_markers, update_shocks, update_slashes, ambient, spell_visuals).run_if(in_state(AppState::Playing)),
+                (consume_events, update_particles, aoe_markers, update_shocks, update_slashes, ambient, spell_visuals, cast_glow).run_if(in_state(AppState::Playing)),
             );
     }
 }
@@ -211,6 +212,7 @@ fn setup(
             (Element::Light, (1.0, 0.97, 0.85), (0.8, 0.75, 0.45), Color::srgba(0.95, 0.85, 0.5, 0.45)),
             (Element::Iron, (0.45, 0.42, 0.4), (0.0, 0.0, 0.0), Color::srgba(0.3, 0.28, 0.27, 0.0)),
             (Element::Ice, (0.85, 0.96, 1.0), (0.3, 0.62, 0.95), Color::srgba(0.55, 0.82, 1.0, 0.5)),
+            (Element::Arcane, (0.82, 0.9, 1.0), (0.35, 0.5, 1.0), Color::srgba(0.45, 0.6, 1.0, 0.5)),
         ]
         .into_iter()
         .map(|(el, c, glow, halo)| (el, spell_mats(&mut mats, c, glow, halo)))
@@ -384,6 +386,7 @@ pub fn consume_events(
     fx.perfect_flash = (fx.perfect_flash - dt * 4.0).max(0.0);
     fx.fury_flash = (fx.fury_flash - dt * 2.5).max(0.0);
     fx.no_stamina = (fx.no_stamina - dt * 3.0).max(0.0);
+    fx.no_mana = (fx.no_mana - dt * 3.0).max(0.0);
     fx.last.clear();
     let seed = (time.elapsed_secs() * 1000.0) as u32;
     for (k, e) in events.0.drain(..).enumerate() {
@@ -474,6 +477,16 @@ pub fn consume_events(
                 }
             }
             SimEvent::NoStamina { .. } => fx.no_stamina = 1.0,
+            SimEvent::NoMana { .. } => fx.no_mana = 1.0,
+            SimEvent::CastBroken { .. } => play(&mut commands, &sounds, "guard_break", 0.5),
+            SimEvent::SpellSwitched { .. } => play(&mut commands, &sounds, "switch", 0.4),
+            SimEvent::Casting { .. } => play(&mut commands, &sounds, "swing", 0.3),
+            SimEvent::ClassChanged { entity } => {
+                play(&mut commands, &sounds, "kindle", 0.9);
+                if let Ok(t) = transforms.get(entity) {
+                    burst(&mut commands, &sparks, &sparks.heal, t.translation() + Vec3::Y * 1.0, 24, 2.0, seed, floor(t.translation() + Vec3::Y));
+                }
+            }
             SimEvent::ItemCycled { .. } => play(&mut commands, &sounds, "switch", 0.35),
             SimEvent::BossAwake => {
                 play(&mut commands, &sounds, "roar", 1.0);
@@ -926,8 +939,9 @@ fn spell_visuals(
                     (v.column, v.inner) = (Some(col(&m.halo)), Some(col(&m.core)));
                 }
                 SpellKind::Eruption => {
-                    // The ground warning takes the casting boss's colour (like the column).
-                    let [r, g, b] = t.bosses[s.boss as usize].color;
+                    // The ground warning takes the casting boss's colour (like the column), a
+                    // player's spell its element's.
+                    let [r, g, b] = s.color(t);
                     let warn = Color::srgba(r, g, b, 0.9);
                     let blend = |c: Color| {
                         let mut mat = Ps1Material::unlit(c);
@@ -1080,5 +1094,37 @@ fn spell_visuals(
                 }
             }
         }
+    }
+}
+
+/// A spell being gathered: sparks of its element rise from the staff's crystal until it goes off
+/// (that's when the mage is vulnerable: a blow breaks the spell).
+fn cast_glow(
+    mut commands: Commands,
+    time: Res<Time>,
+    tuning: Res<Tuning>,
+    sparks: Res<SparkAssets>,
+    players: Query<(&crate::sim::fighter::Action, &crate::sim::fighter::Body), With<crate::sim::player::Player>>,
+    mut acc: Local<f32>,
+) {
+    *acc += time.delta_secs();
+    if *acc < 1.0 / 30.0 {
+        return;
+    }
+    *acc = 0.0;
+    let seed = (time.elapsed_secs() * 1000.0) as u32;
+    for (action, body) in &players {
+        let Some(crate::sim::data::MoveRef::Cast(si)) = action.mv else { continue };
+        let Some(sd) = tuning.magic.spells.get(si as usize) else { continue };
+        if action.tick >= sd.release {
+            continue;
+        }
+        let element = sd.spell.element;
+        let Some(m) = sparks.spell.get(&element) else { continue };
+        let from = if sd.from == [0.0; 3] { [0.25, 1.5, 0.7] } else { sd.from };
+        let tip = crate::sim::math::local_to_world(body.pos, body.yaw, from);
+        // Faster as the spell nears release.
+        let n = 1 + (action.tick * 3 / sd.release.max(1)) as usize;
+        burst(&mut commands, &sparks, &m.spark, tip, n, 1.2, seed.wrapping_add(action.tick * 17), body.pos.y);
     }
 }
